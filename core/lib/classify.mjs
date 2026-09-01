@@ -75,12 +75,8 @@ function fromStructured(error) {
  */
 export function classify(input = {}) {
   const structured = fromStructured(input.error);
-  const text =
-    input.text ??
-    input.error?.message ??
-    input.error?.data?.message ??
-    (input.payload ? JSON.stringify(input.payload) : "");
-  const textual = classifyText(text);
+  const text = [input.text, input.error?.message, input.error?.data?.message].filter(Boolean).join(" ");
+  const textual = classifyText(text || (input.payload ? JSON.stringify(input.payload) : ""));
   if (input.matcher && /rate_limit|ratelimit/i.test(input.matcher)) {
     return { kind: "rate_limit", retryAfterSec: structured?.retryAfterSec ?? textual.retryAfterSec, source: "matcher" };
   }
