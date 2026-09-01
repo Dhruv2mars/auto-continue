@@ -5,7 +5,7 @@
  * undocumented payload shape still classifies; structured fields refine it.
  */
 
-const RATE_LIMIT_RE = /rate limit|usage limit|token limit|429|too many requests|quota|usage cap|plan limit|weekly limit|daily limit|limit.*reached|reached.*limit|exceed/i;
+const RATE_LIMIT_RE = /rate limit|usage limit|usage cap|token limit|429|too many requests|quota|plan limit|weekly limit|daily limit|limit.*reached|reached.*limit/i;
 const OVERLOAD_RE = /overloaded|over capacity|capacity|529|server is busy|temporarily unavailable/i;
 const AUTH_RE = /invalid api key|unauthorized|authentication|401|forbidden|403|not authenticated/i;
 const BILLING_RE = /billing|credit|payment|insufficient funds|402|subscription/i;

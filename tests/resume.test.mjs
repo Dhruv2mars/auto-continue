@@ -54,6 +54,6 @@ describe("detached resume watcher", () => {
   test("state records the continuation after spawn", () => {
     runCli({ AUTO_CONTINUE_RESUME_CMD_CLAUDE: "true" });
     const dir = join(home, "state");
-    expect(readdirSync(dir).filter((f) => !f.endsWith(".tmp")).length).toBe(1);
+    expect(readdirSync(dir).filter((f) => !f.endsWith(".tmp") && !f.startsWith("_")).length).toBe(1);
   });
 });

@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process";
 import { classify } from "./lib/classify.mjs";
 import { decide, blockDecision } from "./lib/policy.mjs";
-import { loadState, saveState, appendLog } from "./lib/state.mjs";
+import { loadState, saveState, appendLog, sessionKey } from "./lib/state.mjs";
 
 const EVENT_ALIASES = {
   stop: "stop",
@@ -31,6 +31,13 @@ function parseArgs(argv) {
   return args;
 }
 
+function intEnv(name) {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const n = parseInt(raw, 10);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 async function readStdin(ms = 10000) {
   if (process.stdin.isTTY) return {};
   return new Promise((resolve) => {
@@ -51,23 +58,43 @@ function sessionOf(payload) {
   return payload.session_id ?? payload.sessionId ?? payload.sessionID ?? payload.session?.sessionID ?? "default";
 }
 
-function emitFor(harness, event, decision) {
-  if (event !== "stop") return;
-  if (harness === "cursor") {
-    process.stdout.write(JSON.stringify({ followup_message: decision.reason }) + "\n");
-  } else {
-    process.stdout.write(JSON.stringify(blockDecision(decision.reason)) + "\n");
+function emitFor(harness, event, decision, done) {
+  if (event !== "stop") return done();
+  const payload = harness === "cursor"
+    ? { followup_message: decision.reason }
+    : blockDecision(decision.reason);
+  process.stdout.write(JSON.stringify(payload) + "\n", done);
+}
+
+const DAILY_RESUME_CEILING = 20;
+
+async function globalResumeCountToday(home) {
+  try {
+    const { readFile } = await import("node:fs/promises");
+    const meta = JSON.parse(await readFile(`${home}/state/_global.json`, "utf8"));
+    const today = new Date().toISOString().slice(0, 10);
+    return meta.day === today ? meta.resumes : 0;
+  } catch {
+    return 0;
   }
 }
 
+async function bumpGlobalResumeCount(home) {
+  const today = new Date().toISOString().slice(0, 10);
+  const count = (await globalResumeCountToday(home)) + 1;
+  const { writeFile, mkdir } = await import("node:fs/promises");
+  await mkdir(`${home}/state`, { recursive: true });
+  await writeFile(`${home}/state/_global.json`, JSON.stringify({ day: today, resumes: count }));
+  return count;
+}
+
 function spawnWatcher(harness, sessionId, delaySec, opts) {
-  const resumeCmdTpl = opts.resumeCmd || (harness === "claude" ? 'claude --resume "{session_id}" -p "{prompt}"' : null);
-  if (!resumeCmdTpl) return false;
+  let resumeCmdTpl = opts.resumeCmd || 'claude --resume "$1" -p "$2"';
+  resumeCmdTpl = resumeCmdTpl.replaceAll("{session_id}", '"$1"').replaceAll("{prompt}", '"$2"');
   const prompt = process.env.AUTO_CONTINUE_PROMPT || "Continue from where the turn was interrupted by the usage limit.";
-  const cmd = resumeCmdTpl.replaceAll("{session_id}", sessionId).replaceAll("{prompt}", prompt);
-  const logFile = `${opts.home}/resumes/${new Date().toISOString().replace(/[:.]/g, "-")}-${sessionId.slice(0, 24)}.log`;
-  const sh = `mkdir -p "${opts.home}/resumes" && sleep ${delaySec} && cd "${opts.cwd}" && { ${cmd}; } >> "${logFile}" 2>&1`;
-  const child = spawn("/bin/sh", ["-c", sh], { detached: true, stdio: "ignore" });
+  const logFile = `${opts.home}/resumes/${new Date().toISOString().replace(/[:.]/g, "-")}-${sessionKey(sessionId)}.log`;
+  const sh = `mkdir -p "${opts.home}/resumes" && sleep ${delaySec} && cd "${opts.cwd}" && { ${resumeCmdTpl}; } >> "$3" 2>&1`;
+  const child = spawn("/bin/sh", ["-c", sh, "auto-continue", sessionId, prompt, logFile], { detached: true, stdio: "ignore" });
   child.unref();
   return true;
 }
@@ -91,9 +118,9 @@ export async function main(argv = process.argv.slice(2)) {
 
   const decision = decide(classification, state, {
     harness,
-    maxContinues: args.maxContinues ?? (process.env.AUTO_CONTINUE_MAX_CONTINUES ? parseInt(process.env.AUTO_CONTINUE_MAX_CONTINUES, 10) : undefined),
-    maxWaitSec: args.maxWaitSec ?? (process.env.AUTO_CONTINUE_MAX_WAIT ? parseInt(process.env.AUTO_CONTINUE_MAX_WAIT, 10) : undefined),
-    minDelaySec: process.env.AUTO_CONTINUE_MIN_DELAY ? parseInt(process.env.AUTO_CONTINUE_MIN_DELAY, 10) : undefined,
+    maxContinues: args.maxContinues ?? intEnv("AUTO_CONTINUE_MAX_CONTINUES"),
+    maxWaitSec: args.maxWaitSec ?? intEnv("AUTO_CONTINUE_MAX_WAIT"),
+    minDelaySec: intEnv("AUTO_CONTINUE_MIN_DELAY"),
   });
 
   const pluginEnv = Object.keys(process.env).filter((k) => /ZCODE|CLAUDE|CODEX|CURSOR|PLUGIN|SESSION/i.test(k)).sort();
@@ -101,20 +128,33 @@ export async function main(argv = process.argv.slice(2)) {
 
   if (decision.action === "continue_now" && event === "stop") {
     await saveState(sessionId, { ...state, continues: decision.continueIndex });
-    emitFor(harness, "stop", decision);
+    await new Promise((resolve) => emitFor(harness, "stop", decision, resolve));
     return decision;
   }
 
   if (decision.action === "resume_later") {
     const canResume = !args.dry && process.env.AUTO_CONTINUE_RESUME !== "0";
-    const spawned = canResume ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd: process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`] }) : false;
+    const recentlyArmed = state.watcherArmedAt && Date.now() - state.watcherArmedAt < 120000;
+    const globalCount = await globalResumeCountToday(home);
+    const overCeiling = globalCount >= DAILY_RESUME_CEILING;
+    const spawned = canResume && !recentlyArmed && !overCeiling
+      ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd: process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`] })
+      : false;
     await saveState(sessionId, { ...state, continues: decision.continueIndex, watcherArmedAt: spawned ? Date.now() : state.watcherArmedAt });
-    if (!spawned) process.stderr.write(`[auto-continue] ${decision.reason}${canResume ? "" : " (auto-resume disabled; AUTO_CONTINUE_RESUME=0 or unsupported harness)"}\n`);
+    if (spawned) await bumpGlobalResumeCount(home);
+    if (!spawned) {
+      const why = recentlyArmed ? "watcher already armed" : overCeiling ? `daily resume ceiling (${DAILY_RESUME_CEILING}) reached` : "auto-resume disabled or unsupported harness";
+      process.stderr.write(`[auto-continue] ${decision.reason} (${why})\n`);
+    }
     return { ...decision, spawned };
   }
 
   if (decision.action === "notify_only") {
     process.stderr.write(`[auto-continue] ${decision.reason}\n`);
+  }
+
+  if (decision.action === "ignore" && event === "stop" && state.continues !== 0) {
+    await saveState(sessionId, { ...state, continues: 0 });
   }
   return decision;
 }

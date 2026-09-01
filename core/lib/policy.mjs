@@ -4,7 +4,9 @@
  * under them so our cap never collides with the harness's kill switch.
  */
 
-export const HARNESS_CAPS = { claude: 7, zcode: 2, codex: 3, cursor: 4, opencode: 3 };
+// Conservative: codex and opencode native block/retry ceilings are not fully
+// documented, so we assume the tightest plausible cap for those harnesses.
+export const HARNESS_CAPS = { claude: 7, zcode: 2, codex: 2, cursor: 4, opencode: 2 };
 export const DEFAULTS = { backoffSec: [45, 300, 1800], maxWaitSec: 7200, minDelaySec: 10 };
 
 /**
@@ -14,10 +16,11 @@ export const DEFAULTS = { backoffSec: [45, 300, 1800], maxWaitSec: 7200, minDela
  */
 export function decide(classification, state, opts) {
   const { kind, retryAfterSec } = classification;
-  const cap = Math.min(opts.maxContinues ?? Infinity, HARNESS_CAPS[opts.harness] ?? 3);
-  const maxWait = opts.maxWaitSec ?? DEFAULTS.maxWaitSec;
-  const minDelay = opts.minDelaySec ?? DEFAULTS.minDelaySec;
-  const backoff = opts.backoffSec ?? DEFAULTS.backoffSec;
+  const finite = (n, fallback) => (Number.isFinite(n) ? n : fallback);
+  const cap = Math.min(finite(opts.maxContinues, Infinity), HARNESS_CAPS[opts.harness] ?? 3);
+  const maxWait = finite(opts.maxWaitSec, DEFAULTS.maxWaitSec);
+  const minDelay = finite(opts.minDelaySec, DEFAULTS.minDelaySec);
+  const backoff = (opts.backoffSec ?? DEFAULTS.backoffSec).map((n) => finite(n, 0));
 
   if (kind === "rate_limit") {
     if (state.continues >= cap) {
