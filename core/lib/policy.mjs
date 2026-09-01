@@ -5,17 +5,18 @@
  */
 
 export const HARNESS_CAPS = { claude: 7, zcode: 2, codex: 3, cursor: 4, opencode: 3 };
-export const DEFAULTS = { backoffSec: [45, 300, 1800], maxWaitSec: 7200 };
+export const DEFAULTS = { backoffSec: [45, 300, 1800], maxWaitSec: 7200, minDelaySec: 10 };
 
 /**
  * @param {{kind: string, retryAfterSec: number|null}} classification
  * @param {{continues: number}} state
- * @param {{harness: string, maxContinues?: number, maxWaitSec?: number, backoffSec?: number[]}} opts
+ * @param {{harness: string, maxContinues?: number, maxWaitSec?: number, backoffSec?: number[], minDelaySec?: number}} opts
  */
 export function decide(classification, state, opts) {
   const { kind, retryAfterSec } = classification;
   const cap = Math.min(opts.maxContinues ?? Infinity, HARNESS_CAPS[opts.harness] ?? 3);
   const maxWait = opts.maxWaitSec ?? DEFAULTS.maxWaitSec;
+  const minDelay = opts.minDelaySec ?? DEFAULTS.minDelaySec;
   const backoff = opts.backoffSec ?? DEFAULTS.backoffSec;
 
   if (kind === "rate_limit") {
@@ -23,7 +24,7 @@ export function decide(classification, state, opts) {
       return { action: "give_up", delaySec: null, reason: `auto-continue reached its cap of ${cap} continuations for this session` };
     }
     const floor = backoff[Math.min(state.continues, backoff.length - 1)];
-    const delay = Math.min(Math.max(retryAfterSec ?? floor, 10), maxWait);
+    const delay = Math.min(Math.max(retryAfterSec ?? floor, minDelay), maxWait);
     return {
       action: "resume_later",
       delaySec: delay,
