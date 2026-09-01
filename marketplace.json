@@ -1,0 +1,11 @@
+{
+  "name": "auto-continue",
+  "plugins": [
+    {
+      "name": "auto-continue",
+      "source": "./",
+      "description": "Automatically resume sessions interrupted by usage limits.",
+      "version": "0.1.0"
+    }
+  ]
+}

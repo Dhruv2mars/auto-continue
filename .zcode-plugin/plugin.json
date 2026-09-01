@@ -1,0 +1,7 @@
+{
+  "name": "auto-continue",
+  "version": "0.1.0",
+  "description": "Automatically resume sessions interrupted by usage limits: classifies the stop reason and re-enters when the quota window resets.",
+  "license": "MIT",
+  "hooks": "hooks"
+}

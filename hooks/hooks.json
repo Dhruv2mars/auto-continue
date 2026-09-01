@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v node >/dev/null 2>&1 && node \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-continue.mjs\" stop || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}

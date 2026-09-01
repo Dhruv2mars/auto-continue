@@ -1,0 +1,19 @@
+{
+  "name": "auto-continue",
+  "version": "0.1.0",
+  "description": "Automatically resume sessions interrupted by usage limits: classifies the stop reason and re-enters when the quota window resets.",
+  "hooks": {
+    "StopFailure": [
+      {
+        "matcher": "rate_limit|overloaded",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "command -v node >/dev/null 2>&1 && node \"${CLAUDE_PLUGIN_ROOT}/hooks/auto-continue.mjs\" stop_failure || true",
+            "timeout": 20
+          }
+        ]
+      }
+    ]
+  }
+}
