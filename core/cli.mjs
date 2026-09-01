@@ -95,7 +95,8 @@ export async function main(argv = process.argv.slice(2)) {
     maxWaitSec: args.maxWaitSec ?? (process.env.AUTO_CONTINUE_MAX_WAIT ? parseInt(process.env.AUTO_CONTINUE_MAX_WAIT, 10) : undefined),
   });
 
-  await appendLog({ harness, event, session: sessionId, kind: classification.kind, source: classification.source, action: decision.action, delaySec: decision.delaySec, continues: state.continues, dry: !!args.dry });
+  const pluginEnv = Object.keys(process.env).filter((k) => /ZCODE|CLAUDE|CODEX|CURSOR|PLUGIN|SESSION/i.test(k)).sort();
+  await appendLog({ harness, event, session: sessionId, kind: classification.kind, source: classification.source, action: decision.action, delaySec: decision.delaySec, continues: state.continues, dry: !!args.dry, payloadKeys: Object.keys(payload).sort(), pluginEnv });
 
   if (decision.action === "continue_now" && event === "stop") {
     await saveState(sessionId, { ...state, continues: decision.continueIndex });
