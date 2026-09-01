@@ -66,7 +66,7 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
   const prompt = process.env.AUTO_CONTINUE_PROMPT || "Continue from where the turn was interrupted by the usage limit.";
   const cmd = resumeCmdTpl.replaceAll("{session_id}", sessionId).replaceAll("{prompt}", prompt);
   const logFile = `${opts.home}/resumes/${new Date().toISOString().replace(/[:.]/g, "-")}-${sessionId.slice(0, 24)}.log`;
-  const sh = `mkdir -p "${opts.home}/resumes" && sleep ${delaySec} && cd "${opts.cwd}" && ${cmd} >> "${logFile}" 2>&1`;
+  const sh = `mkdir -p "${opts.home}/resumes" && sleep ${delaySec} && cd "${opts.cwd}" && { ${cmd}; } >> "${logFile}" 2>&1`;
   const child = spawn("/bin/sh", ["-c", sh], { detached: true, stdio: "ignore" });
   child.unref();
   return true;
@@ -93,6 +93,7 @@ export async function main(argv = process.argv.slice(2)) {
     harness,
     maxContinues: args.maxContinues ?? (process.env.AUTO_CONTINUE_MAX_CONTINUES ? parseInt(process.env.AUTO_CONTINUE_MAX_CONTINUES, 10) : undefined),
     maxWaitSec: args.maxWaitSec ?? (process.env.AUTO_CONTINUE_MAX_WAIT ? parseInt(process.env.AUTO_CONTINUE_MAX_WAIT, 10) : undefined),
+    minDelaySec: process.env.AUTO_CONTINUE_MIN_DELAY ? parseInt(process.env.AUTO_CONTINUE_MIN_DELAY, 10) : undefined,
   });
 
   const pluginEnv = Object.keys(process.env).filter((k) => /ZCODE|CLAUDE|CODEX|CURSOR|PLUGIN|SESSION/i.test(k)).sort();

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "auto-continue",
+  "version": "0.1.0",
+  "description": "Automatically resume agent sessions interrupted by usage limits.",
+  "author": { "name": "Dhruv2mars" },
+  "license": "MIT",
+  "homepage": "https://github.com/Dhruv2mars/auto-continue",
+  "repository": "https://github.com/Dhruv2mars/auto-continue",
+  "keywords": ["auto-continue", "rate-limit", "quota", "resume", "hooks"]
+}

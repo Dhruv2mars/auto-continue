@@ -1,0 +1,11 @@
+{
+  "hooks": {
+    "stop": [
+      {
+        "command": "node hooks/auto-continue.mjs stop cursor",
+        "timeout": 20,
+        "loop_limit": 4
+      }
+    ]
+  }
+}

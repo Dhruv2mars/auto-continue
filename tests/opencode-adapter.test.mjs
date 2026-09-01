@@ -24,7 +24,7 @@ afterEach(() => {
 function makePlugin() {
   const client = {
     session: {
-      prompt: async ({ path, body }) => {
+      promptAsync: async ({ path, body }) => {
         prompts.push({ id: path.id, text: body.parts[0].text });
       },
     },

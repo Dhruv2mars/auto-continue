@@ -1,0 +1,12 @@
+{
+  "name": "auto-continue-monorepo",
+  "private": true,
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "test": "bun test",
+    "sync-opencode": "bun scripts/sync-opencode.mjs",
+    "publish:opencode": "bun scripts/sync-opencode.mjs && cd adapters/opencode && npm publish"
+  }
+}
