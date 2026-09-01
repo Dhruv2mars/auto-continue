@@ -56,7 +56,7 @@ export const AutoContinue = async ({ client }) => {
           if (waitedMs < delayMs) {
             setTimeout(async () => {
               try {
-                await client.session.prompt({
+                await client.session.promptAsync({
                   path: { id: sessionID },
                   body: { parts: [{ type: "text", text: RETRY_PROMPT }] },
                 });
@@ -66,7 +66,7 @@ export const AutoContinue = async ({ client }) => {
               }
             }, delayMs - waitedMs);
           } else {
-            await client.session.prompt({
+            await client.session.promptAsync({
               path: { id: sessionID },
               body: { parts: [{ type: "text", text: RETRY_PROMPT }] },
             });
