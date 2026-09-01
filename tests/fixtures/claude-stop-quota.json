@@ -1,0 +1,8 @@
+{
+  "session_id": "test-session-quota",
+  "transcript_path": "/tmp/transcript.jsonl",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "cwd": "/tmp",
+  "last_assistant_message": "Claude's usage limit has been reached. Your limit will reset at 5:00pm."
+}

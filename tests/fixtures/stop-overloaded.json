@@ -1,0 +1,7 @@
+{
+  "session_id": "test-session-overload",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false,
+  "last_assistant_message": "API Error: 529 the provider is currently overloaded, please retry",
+  "error": { "statusCode": 529, "message": "overloaded" }
+}
