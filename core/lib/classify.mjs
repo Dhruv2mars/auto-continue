@@ -5,8 +5,11 @@
  * undocumented payload shape still classifies; structured fields refine it.
  */
 
-const RATE_LIMIT_RE = /rate limit|usage limit|usage cap|token limit|429|too many requests|quota|plan limit|weekly limit|daily limit|limit.*reached|reached.*limit/i;
-const OVERLOAD_RE = /overloaded|over capacity|capacity|529|server is busy|temporarily unavailable/i;
+// Limit idioms only: bare nouns like "quota" or "capacity" appear constantly
+// in benign assistant prose ("the quota of open files per process"), so they
+// must never arm the watcher on their own.
+const RATE_LIMIT_RE = /rate limit|usage limit|usage cap|token limit|429|too many requests|quota (?:exceeded|exhausted|reached|limit)|your quota|quota is (?:exceeded|exhausted)|plan limit|weekly limit|daily limit|limit.*reached|reached.*limit/i;
+const OVERLOAD_RE = /overloaded|over capacity|at capacity|529|server is busy|temporarily unavailable/i;
 const AUTH_RE = /invalid api key|unauthorized|authentication|401|forbidden|403|not authenticated/i;
 const BILLING_RE = /billing|credit|payment|insufficient funds|402|subscription/i;
 const ABORT_RE = /aborted|abortedbyuser|user interrupt|cancelled by user|canceled by user/i;
@@ -56,7 +59,9 @@ export function classifyText(text) {
 
 function fromStructured(error) {
   if (!error || typeof error !== "object") return null;
-  const status = error.statusCode ?? error.status ?? error.data?.statusCode ?? error.data?.status;
+  // Coerce: providers send "429" (string) as often as 429 (number).
+  const raw = error.statusCode ?? error.status ?? error.data?.statusCode ?? error.data?.status;
+  const status = raw == null || raw === "" ? NaN : Number(raw);
   if (status === 429) {
     const headers = error.responseHeaders ?? error.data?.responseHeaders ?? {};
     const ra = headers["retry-after"] ?? headers["Retry-After"];
@@ -65,7 +70,9 @@ function fromStructured(error) {
   if (status === 401 || status === 403) return { kind: "auth", retryAfterSec: null };
   if (status === 402) return { kind: "billing", retryAfterSec: null };
   if (status === 529 || status === 503) return { kind: "overloaded", retryAfterSec: null };
-  if (error.isRetryable === true) return { kind: "rate_limit", retryAfterSec: null };
+  // isRetryable means "transient, try again soon" (timeouts, capacity) —
+  // overloaded, not rate_limit: it must not consume the quota backoff ladder.
+  if (error.isRetryable === true) return { kind: "overloaded", retryAfterSec: null };
   return null;
 }
 

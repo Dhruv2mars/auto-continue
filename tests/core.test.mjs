@@ -221,3 +221,49 @@ describe("cli end to end", () => {
     expect(p.exitCode).toBe(0);
   });
 });
+
+describe("classify round-2 fixes", () => {
+  test("string statusCode '429' coerces to rate_limit", () => {
+    const c = classify({ error: { statusCode: "429" } });
+    expect(c.kind).toBe("rate_limit");
+  });
+
+  test("string statusCode '401' coerces to auth", () => {
+    const c = classify({ error: { statusCode: "401" } });
+    expect(c.kind).toBe("auth");
+  });
+
+  test("numeric-string status in data.status coerces", () => {
+    const c = classify({ error: { data: { status: "529" } } });
+    expect(c.kind).toBe("overloaded");
+  });
+
+  test("non-numeric status falls through to text baseline", () => {
+    const c = classify({ error: { statusCode: "abc", message: "rate limit exceeded" } });
+    expect(c.kind).toBe("rate_limit");
+    expect(c.source).toBe("text");
+  });
+
+  test("isRetryable=true maps to overloaded, not rate_limit", () => {
+    const c = classify({ error: { isRetryable: true, message: "connection timeout" } });
+    expect(c.kind).toBe("overloaded");
+    expect(c.source).toBe("structured");
+  });
+
+  test("matcher + isRetryable stays rate_limit (matcher wins advisory)", () => {
+    const c = classify({ matcher: "rate_limit", error: { isRetryable: true } });
+    expect(c.kind).toBe("rate_limit");
+  });
+
+  test("benign assistant prose mentioning quota words does not classify rate_limit", () => {
+    const c = classify({
+      text: "I raised the stream buffer's capacity to 4 so the quota of open files per process is not hit.",
+    });
+    expect(c.kind).toBe("other");
+  });
+
+  test("genuine limit transcript still classifies rate_limit", () => {
+    expect(classifyText("Claude's usage limit has been reached. Your limit will reset at 5:00pm.").kind).toBe("rate_limit");
+    expect(classifyText("API Error: 429 too many requests").kind).toBe("rate_limit");
+  });
+});
