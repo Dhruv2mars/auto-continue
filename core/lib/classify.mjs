@@ -78,8 +78,14 @@ export function classify(input = {}) {
   const text = [input.text, input.error?.message, input.error?.data?.message].filter(Boolean).join(" ");
   const textual = classifyText(text || (input.payload ? JSON.stringify(input.payload) : ""));
   if (input.matcher && /rate_limit|ratelimit/i.test(input.matcher)) {
+    if (structured && (structured.kind === "auth" || structured.kind === "billing")) {
+      return { kind: structured.kind, retryAfterSec: structured.retryAfterSec ?? textual.retryAfterSec, source: "structured" };
+    }
+    if (textual.kind === "abort" || textual.kind === "auth" || textual.kind === "billing") {
+      return { ...textual, source: "text" };
+    }
     return { kind: "rate_limit", retryAfterSec: structured?.retryAfterSec ?? textual.retryAfterSec, source: "matcher" };
   }
-  if (structured) return { ...structured, source: "structured" };
+  if (structured) return { kind: structured.kind, retryAfterSec: structured.retryAfterSec ?? textual.retryAfterSec, source: "structured" };
   return { ...textual, source: "text" };
 }

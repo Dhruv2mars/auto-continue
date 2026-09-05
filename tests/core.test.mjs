@@ -65,6 +65,25 @@ describe("classify", () => {
     expect(c.kind).toBe("rate_limit");
   });
 
+  test("matcher + 401 text stays auth", () => {
+    const c = classify({ matcher: "rate_limit", text: "invalid api key (401 unauthorized)" });
+    expect(c.kind).toBe("auth");
+  });
+
+  test("matcher + abort text stays abort", () => {
+    const c = classify({ matcher: "rate_limit", text: "Request was aborted by user" });
+    expect(c.kind).toBe("abort");
+  });
+
+  test("structured 429 with retry text merges retryAfterSec", () => {
+    const c = classify({
+      error: { statusCode: 429, message: "Rate limit reached. Try again in 12 minutes." },
+    });
+    expect(c.kind).toBe("rate_limit");
+    expect(c.retryAfterSec).toBe(720);
+    expect(c.source).toBe("structured");
+  });
+
   test("full payload stringify baseline still classifies undocumented shapes", () => {
     const c = classify({ payload: { weird: { nested: "Error: usage limit exceeded for your plan" } } });
     expect(c.kind).toBe("rate_limit");
