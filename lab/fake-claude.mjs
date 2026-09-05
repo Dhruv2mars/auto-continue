@@ -39,11 +39,23 @@ mkdirSync(LAB_DIR, { recursive: true });
 const args = process.argv.slice(2);
 const sessionId = args[0] ?? "";
 const prompt = args.slice(1).join(" ");
+let stdinText = "";
+if (!process.stdin.isTTY) {
+  process.stdin.setEncoding("utf8");
+  stdinText = await new Promise((resolve) => {
+    let data = "";
+    const timer = setTimeout(() => resolve(data), 2000);
+    process.stdin.on("data", (c) => (data += c));
+    process.stdin.on("end", () => { clearTimeout(timer); resolve(data); });
+    process.stdin.on("error", () => { clearTimeout(timer); resolve(data); });
+  });
+}
 const entry = {
   ts: new Date().toISOString(),
   script: "fake-claude",
   sessionId,
   prompt,
+  stdin: stdinText,
   argv: args,
   home: process.env.AUTO_CONTINUE_HOME,
 };

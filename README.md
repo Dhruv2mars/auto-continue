@@ -4,6 +4,8 @@ Automatically resume agent sessions interrupted by usage limits, across five cod
 
 When a provider rate limit or quota window kills a turn, auto-continue classifies the failure and acts: quota windows get a detached watcher (or an in-process re-prompt on OpenCode) that re-enters the session when the window passes, honoring `retry-after` where the harness exposes it; transient overload gets an immediate bounded re-prompt. Auth and billing errors are never retried. Per-session caps, a watcher dedupe window, a global daily resume ceiling, and the harnesses' own kill switches prevent runaway loops.
 
+Queue your next prompt while you wait: `/continue-queue <prompt>` stores it for the session, and the watcher sends the queue head (one per wake) instead of the canned fallback. `list`, `status`, and `clear` variants included; or drive it from any shell via `node core/cli.mjs enqueue|list|status|clear <session>`.
+
 ## How it works per harness
 
 | Harness | Mechanism | Install | Status |
@@ -20,30 +22,42 @@ All five read the same core: [core/lib](core/lib) classifies the failure, comput
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `AUTO_CONTINUE_MAX_CONTINUES` | harness cap (claude 7, zcode 2, codex 2, cursor 4, opencode 2) | max resumes per session; always clamped one-under the harness's own kill switch |
+| `AUTO_CONTINUE_MAX_CONTINUES` | harness cap (claude 7, zcode 2, codex 2, cursor 3, opencode 2) | max resumes per session; always clamped one-under the harness's own kill switch |
 | `AUTO_CONTINUE_MAX_WAIT` | 7200 | upper bound on a single wait, seconds |
 | `AUTO_CONTINUE_MIN_DELAY` | 10 | lower bound on a single wait, seconds |
 | `AUTO_CONTINUE_RESUME` | `1` | set `0` to disable the detached resume watcher |
-| `AUTO_CONTINUE_RESUME_CMD_CLAUDE` | `claude --resume "$1" -p "$2"` | resume command template; `$1` is the session id, `$2` the resume prompt (`{session_id}`/`{prompt}` placeholders also accepted) |
+| `AUTO_CONTINUE_RESUME_CMD_CLAUDE` | ``claude --resume "$1" -p "$(if [ -s "$AC_PROMPT_FILE" ]; then cat "$AC_PROMPT_FILE"; else printf '%s' "$2"; fi)"`` | default resume template; `$1` is the session id, `$2` the canned fallback prompt (`{session_id}`/`{prompt}` placeholders also accepted). The watcher drains the queue head into `$AC_PROMPT_FILE` (exported) and the default template consumes it via double-quoted `$(cat ...)` (falls back to `$2` when empty); custom templates keep `$1`/`$2` positionals and should read the queued prompt from stdin. |
 | `AUTO_CONTINUE_RESUME_CMD_<HARNESS>` | unset | opt-in detached resume for codex / cursor |
-| `AUTO_CONTINUE_PROMPT` | "Continue from where the turn was interrupted by the usage limit." | resume prompt text |
+| `AUTO_CONTINUE_PROMPT` | "Continue from where the turn was interrupted by the usage limit." | resume prompt text when the queue is empty |
+| `AUTO_CONTINUE_HARNESS` | auto-detected | override harness for queue commands (`--harness` flag works too) |
 
-Safety rails: resume watchers deduplicate within a 2-minute window, a global ceiling of 20 detached resumes per day, per-session counters reset on a healthy turn end, payload-derived values reach the resume command only as quoted positional shell parameters (never interpolated into the command string), and `~/.auto-continue/` is created `0700`.
+Safety rails: resume watchers deduplicate within a 2-minute window (plus an already-queued guard out to `AUTO_CONTINUE_MAX_WAIT` so long sleeps never stack a second watcher), a global ceiling of 20 detached resumes per day, per-session counters reset on a healthy turn end (which also acks the delivered `.draining` head; overload re-prompts never ack), the watcher acks `.draining` only when its resume exits 0 (else it stays for restore), queued prompts reach the resume command via the `$AC_PROMPT_FILE` temp file (never interpolated into the command string), and `~/.auto-continue/` is created `0700`.
 
-State and the audit log live in `~/.auto-continue/` (`state/<session>.json`, `log.jsonl`, `resumes/*.log`). Hooks never exit nonzero on internal errors; a broken hook must not break a session.
+State and the audit log live in `~/.auto-continue/` (`state/<session>.json`, `queue/<session>.json` + `.draining` in-flight head, `log.jsonl`, `resumes/*.log`). Hooks never exit nonzero on internal errors; a broken hook must not break a session.
 
 ## Behavior notes
 
 - **Claude Code**: a quota-killed turn fires `StopFailure`, which has no decision control, so the plugin arms a detached watcher that waits out the window and runs `claude --resume`. Claude Code also ships a native `autoContinueAtUsageLimit` setting; this plugin is the cross-harness superset. User interrupts are never resumed.
 - **ZCode**: the Stop hook returns `{"decision":"block","reason":...}`; ZCode caps continuations at 3 per run, we stay at 2.
 - **Codex**: `Stop` fires on normal turn ends. Probes on 0.152.0 confirmed quota-killed turns never reach Stop; watchers via `AUTO_CONTINUE_RESUME_CMD_CODEX` are the workaround if you have a resume entry point.
-- **Cursor**: `stop` hooks fire in interactive sessions (TUI/IDE); headless `cursor-agent -p` skips them in build 2026.07.23. Resume uses `followup_message`, capped by `loop_limit`.
-- **OpenCode**: resume lives in-process, so it works while the session (TUI/server) is open; headless `opencode run` exits on terminal errors before the wait elapses. There is no user-activity guard yet: a scheduled re-prompt lands even if you typed first.
+- **Cursor**: `stop` hooks fire in interactive sessions (TUI/IDE); headless `cursor-agent -p` skips them in build 2026.07.23. Resume uses `followup_message`, capped by `loop_limit` (4); our cap stays one under at 3.
+- **OpenCode**: resume lives in-process, so it works while the session (TUI/server) is open; headless `opencode run` exits on terminal errors before the wait elapses. A best-effort user-activity guard stands down when the idle payload shows you already continued; unknown payload shapes still resume.
+
+## Queue commands
+
+| Command | Shell | Meaning |
+|---|---|---|
+| `/continue-queue <prompt>` | `node core/cli.mjs enqueue <session> <prompt>` | store prompt, arm watcher or report honestly why not |
+| `/continue-list` | `node core/cli.mjs list <session>` | show queued prompts, FIFO head first |
+| `/continue-status` | `node core/cli.mjs status <session>` | queue depth, watcher state, caps, daily ceiling |
+| `/continue-clear` | `node core/cli.mjs clear <session>` | drop queue + in-flight head |
+
+One prompt drains per wake. A leftover `.draining` head is restored on the next limit event (never lost), acked by the watcher when its resume exits 0, and acked on a clean turn end that resets the healthy counter. Empty queue falls back to the canned Continue prompt.
 
 ## Development
 
 ```sh
-bun test    # 44 tests: classify, policy, state, cli, watchers, injection, dedupe, opencode adapter
+bun test    # queue, classify, policy, state, cli, watchers, injection, dedupe, opencode adapter
 ```
 
 Layout: `core/` (shared classification + policy + state), `hooks/` (shared hook entry + per-harness hook configs), `adapters/opencode/` (npm package, vendored core via `bun run sync-opencode`), per-harness manifests at the repo root.

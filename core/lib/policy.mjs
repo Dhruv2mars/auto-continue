@@ -6,7 +6,7 @@
 
 // Conservative: codex and opencode native block/retry ceilings are not fully
 // documented, so we assume the tightest plausible cap for those harnesses.
-export const HARNESS_CAPS = { claude: 7, zcode: 2, codex: 2, cursor: 4, opencode: 2 };
+export const HARNESS_CAPS = { claude: 7, zcode: 2, codex: 2, cursor: 3, opencode: 2 };
 export const DEFAULTS = { backoffSec: [45, 300, 1800], maxWaitSec: 7200, minDelaySec: 10 };
 
 /**
