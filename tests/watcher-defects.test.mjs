@@ -145,3 +145,42 @@ describe("watcher defects", () => {
     expect(e.armed).toBe(true);
   });
 });
+
+describe("probe-before-send (round-2)", () => {
+  test("dead probe re-arms, delivers once probe turns alive", async () => {
+    const got = join(home, "got-flip.txt");
+    const deadFlag = join(home, "dead-flag");
+    writeFileSync(deadFlag, "1");
+    const probeCmd = join(home, "flip-probe.sh");
+    writeFileSync(probeCmd, `#!/bin/sh\n[ -f ${deadFlag} ] && exit 1\nexit 0\n`);
+    chmodSync(probeCmd, 0o755);
+    const env = {
+      AUTO_CONTINUE_RESUME_CMD_CLAUDE: `cat >> ${got}`,
+      AUTO_CONTINUE_PROBE_CMD_CLAUDE: probeCmd,
+      AUTO_CONTINUE_PROBE_BACKOFF: "1 2 3",
+    };
+    const e = out(runCli(["enqueue", "pb-flip", "probe-flip-delivered"], env));
+    expect(e.armed).toBe(true);
+    await sleep(2000); // wake + dead probe #1 -> re-arm 1s
+    rmSync(deadFlag);  // quota revives
+    await waitFor(got, 10000);
+    expect(readFileSync(got, "utf8")).toContain("probe-flip-delivered");
+    expect(out(runCli(["list", "pb-flip"]))).toEqual([]);
+  }, 20000);
+
+  test("probe gives up after ladder; queue intact, nothing delivered", async () => {
+    const got = join(home, "got-giveup.txt");
+    const env = {
+      AUTO_CONTINUE_RESUME_CMD_CLAUDE: `cat >> ${got}`,
+      AUTO_CONTINUE_PROBE_CMD_CLAUDE: "exit 1",
+      AUTO_CONTINUE_PROBE_BACKOFF: "1 1 1",
+    };
+    const e = out(runCli(["enqueue", "pb-giveup", "kept-safe"], env));
+    expect(e.armed).toBe(true);
+    await sleep(6000); // 3 x 1s backoff + probe runs
+    expect(existsSync(got)).toBe(false);
+    const items = out(runCli(["list", "pb-giveup"]));
+    expect(items).toHaveLength(1);
+    expect(items[0].prompt).toBe("kept-safe");
+  }, 20000);
+});

@@ -21,6 +21,7 @@ import { enqueue, listQueue, clearQueue, restoreDraining, ackDraining, readDrain
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DRAIN_MJS = join(HERE, "drain.mjs");
 const DRAIN_ACK_MJS = join(HERE, "drain-ack.mjs");
+const PROBE_MJS = join(HERE, "probe.mjs");
 const CANNED_PROMPT = "Continue from where the turn was interrupted by the usage limit.";
 // Default resume consumes the drained queue file ($AC_PROMPT_FILE, exported
 // by the watcher), falling back to the canned $2 when the file is empty.
@@ -131,10 +132,39 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
   // fallback when empty; custom templates keep $1/$2 positionals and read
   // stdin. Ack .draining only when the resume exits 0, else leave it for
   // restore. AUTO_CONTINUE_HOME is inherited.
-  const sh = `mkdir -p ${sq(`${opts.home}/resumes`)} && sleep ${delay} && cd ${sq(opts.cwd)} && export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; if [ -s "$AC_PROMPT_FILE" ]; then { ${resumeCmdTpl}; } < "$AC_PROMPT_FILE" && ${sq(process.execPath)} ${sq(DRAIN_ACK_MJS)} "$1" < /dev/null; else printf '%s' "$2" | { ${resumeCmdTpl}; }; fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
+  //
+  // Probe-before-send: when a probe is configured, the wake first checks
+  // quota (core/probe.mjs, override per harness with
+  // AUTO_CONTINUE_PROBE_CMD_<H>). Still limited -> re-arm with backoff
+  // (AUTO_CONTINUE_PROBE_BACKOFF, default "45 300 1800") until attempts run
+  // out, then give up with the queue untouched (next limit event re-arms).
+  // Probe failures count as still-limited: never send into a dead quota.
+  const probeEnabled = opts.probe === true || (opts.probe !== false && probeConfigured(harness));
+  const backoff = probeBackoffSec();
+  const sh = `mkdir -p ${sq(`${opts.home}/resumes`)} && sleep ${delay} && cd ${sq(opts.cwd)} && ` +
+    (probeEnabled
+      ? `backoff=${sq(backoff.join(" "))}; attempt=0; while [ "$attempt" -lt ${backoff.length} ]; do if ${sq(process.execPath)} ${sq(PROBE_MJS)} ${sq(harness)} >> "$3" 2>&1; then break; fi; wait_s=$(echo $backoff | cut -d' ' -f$((attempt + 1))); echo "probe: still limited; re-arming in ${"$"}{wait_s}s (attempt $((attempt + 1))/${backoff.length})" >> "$3"; sleep "$wait_s"; attempt=$((attempt + 1)); done; if [ "$attempt" -ge ${backoff.length} ]; then echo "probe: giving up (quota still limited); queue left intact" >> "$3"; exit 0; fi; `
+      : ``) +
+    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; if [ -s "$AC_PROMPT_FILE" ]; then { ${resumeCmdTpl}; } < "$AC_PROMPT_FILE" && ${sq(process.execPath)} ${sq(DRAIN_ACK_MJS)} "$1" < /dev/null; else printf '%s' "$2" | { ${resumeCmdTpl}; }; fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
   const child = spawn("/bin/sh", ["-c", sh, "auto-continue", sessionId, prompt, logFile], { detached: true, stdio: "ignore" });
   child.unref();
   return true;
+}
+
+/** Probe is on when a per-harness command is set or AUTO_CONTINUE_PROBE=1. */
+function probeConfigured(harness) {
+  if (process.env.AUTO_CONTINUE_PROBE === "0") return false;
+  if (process.env[`AUTO_CONTINUE_PROBE_CMD_${harness.toUpperCase()}`]) return true;
+  return process.env.AUTO_CONTINUE_PROBE === "1";
+}
+
+/** Re-arm ladder, seconds. Default 45 -> 300 -> 1800, each >= 1s. */
+function probeBackoffSec() {
+  const raw = (process.env.AUTO_CONTINUE_PROBE_BACKOFF || "45 300 1800")
+    .split(/\s+/)
+    .map((s) => parseInt(s, 10))
+    .filter((n) => Number.isFinite(n) && n >= 0);
+  return raw.length ? raw : [45, 300, 1800];
 }
 
 function effectiveMaxWaitSec(args) {
