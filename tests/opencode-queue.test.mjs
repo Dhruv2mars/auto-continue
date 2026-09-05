@@ -178,3 +178,23 @@ describe("opencode queue resume", () => {
     expect(prompts.length).toBe(1);
   });
 });
+
+describe("opencode parked-timer races (round-2)", () => {
+  test("late idle during timer in-flight send does not double-send", async () => {
+    process.env.AUTO_CONTINUE_MIN_DELAY = "1";
+    const client = makeClient({ delayMs: 250 });
+    const plugin = await freshPlugin(client);
+    await plugin.event({ event: quotaError("q-timer", "1") });
+    await new Promise((r) => setTimeout(r, 30));
+    await plugin.event({ event: idle("q-timer") });
+    // Timer fires ~1s after arm; its sendResume blocks 250ms in promptAsync.
+    // A late idle arriving inside that window must see the claim and park,
+    // not re-drain the (now-empty) queue / re-send.
+    await new Promise((r) => setTimeout(r, 1050));
+    const midSend = plugin.event({ event: idle("q-timer") });
+    await midSend;
+    await new Promise((r) => setTimeout(r, 400));
+    expect(prompts.length).toBe(1);
+    expect(prompts[0].id).toBe("q-timer");
+  }, 10000);
+});

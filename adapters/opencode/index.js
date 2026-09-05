@@ -267,22 +267,27 @@ export const AutoContinue = async ({ client }) => {
             if (armed.timer) { release(); return; } // one parked timer per session
             const timerProps = () => pending.get(sessionID)?.latestProps ?? props;
             armed.timer = setTimeout(async () => {
-              const latest = timerProps();
-              if (userContinuedSince(latest, armed.at, armed.baseline)) {
-                if (armed.timer) { try { clearTimeout(armed.timer); } catch {} }
-                pending.delete(sessionID);
-                try {
-                  await disarmDisk(sessionID);
-                  await appendLog({ harness: "opencode", event: "idle_skipped", session: sessionID, kind: "user", source: "payload", action: "ignore", detail: "user continued before resume", continues: null });
-                } catch {}
-                return;
-              }
-              pending.delete(sessionID);
+              // Claim the sending slot before acting: a late idle during this
+              // callback's await must see sending.has() and park, not re-send.
+              if (sending.has(sessionID)) return; // impossible, but never double-claim
+              sending.add(sessionID);
+              let timerReleased = false;
+              const releaseTimer = () => { if (!timerReleased) { timerReleased = true; sending.delete(sessionID); } };
               try {
+                const latest = timerProps();
+                if (userContinuedSince(latest, armed.at, armed.baseline)) {
+                  if (armed.timer) { try { clearTimeout(armed.timer); } catch {} }
+                  pending.delete(sessionID);
+                  try {
+                    await disarmDisk(sessionID);
+                    await appendLog({ harness: "opencode", event: "idle_skipped", session: sessionID, kind: "user", source: "payload", action: "ignore", detail: "user continued before resume", continues: null });
+                  } catch {}
+                  return;
+                }
+                pending.delete(sessionID);
                 await sendResume(client, sessionID);
               } catch {} finally {
-                // sendResume owns its errors; sending set is module-global,
-                // no per-timer claim to release here.
+                releaseTimer();
               }
             }, delayMs - waitedMs);
             armed.latestProps = props;
