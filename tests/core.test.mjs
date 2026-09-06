@@ -262,8 +262,27 @@ describe("classify round-2 fixes", () => {
     expect(c.kind).toBe("other");
   });
 
-  test("genuine limit transcript still classifies rate_limit", () => {
+  test("benign prose with 'limit ... reached' spread does not classify rate_limit", () => {
+    // Regression: /limit.*reached|reached.*limit/ spanned arbitrary prose.
+    const texts = [
+      "Once the 100th row is reached, we apply a limit to keep memory bounded.",
+      "The character limit for titles was reached, so the import stopped early.",
+    ];
+    for (const text of texts) expect(classify({ text }).kind).toBe("other");
+  });
+
+  test("real limit messages that name the limit explicitly still classify rate_limit", () => {
+    expect(classifyText("You have reached your usage limit. Your limit will reset at 5:00pm.").kind).toBe("rate_limit");
+    expect(classifyText("usage limit reached").kind).toBe("rate_limit");
+    expect(classifyText("rate limit reached, retry later").kind).toBe("rate_limit");
     expect(classifyText("Claude's usage limit has been reached. Your limit will reset at 5:00pm.").kind).toBe("rate_limit");
     expect(classifyText("API Error: 429 too many requests").kind).toBe("rate_limit");
+  });
+
+  test("HTTP-date retry-after header does not produce NaN delaySec", () => {
+    const c = classify({ error: { statusCode: 429, responseHeaders: { "retry-after": "Wed, 21 Oct 2026 07:28:00 GMT" } } });
+    expect(c.kind).toBe("rate_limit");
+    expect(c.retryAfterSec).toBeNull();
+    expect(Number.isFinite(c.retryAfterSec) || c.retryAfterSec === null).toBe(true);
   });
 });

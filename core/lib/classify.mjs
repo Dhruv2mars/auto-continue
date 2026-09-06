@@ -6,9 +6,11 @@
  */
 
 // Limit idioms only: bare nouns like "quota" or "capacity" appear constantly
-// in benign assistant prose ("the quota of open files per process"), so they
-// must never arm the watcher on their own.
-const RATE_LIMIT_RE = /rate limit|usage limit|usage cap|token limit|429|too many requests|quota (?:exceeded|exhausted|reached|limit)|your quota|quota is (?:exceeded|exhausted)|plan limit|weekly limit|daily limit|limit.*reached|reached.*limit/i;
+// in benign assistant prose ("the quota of open files per process"), and
+// wildcard spans like /limit.*reached/ match ordinary sentences ("once the
+// 100th row is reached, we apply a limit"), so this list stays literal:
+// fixed phrases, and limit-noun + reached/failed within a short window.
+const RATE_LIMIT_RE = /rate limit|usage limit|usage cap|token limit|429|too many requests|quota (?:exceeded|exhausted|reached|limit)|your quota|quota is (?:exceeded|exhausted)|plan limit|weekly limit|daily limit|(?:usage|rate|token|plan|weekly|daily|character|message) limit (?:has been )?(?:reached|hit)|(?:reached|hit) your (?:usage|rate|token|plan|weekly|daily) limit/i;
 const OVERLOAD_RE = /overloaded|over capacity|at capacity|529|server is busy|temporarily unavailable/i;
 const AUTH_RE = /invalid api key|unauthorized|authentication|401|forbidden|403|not authenticated/i;
 const BILLING_RE = /billing|credit|payment|insufficient funds|402|subscription/i;
@@ -47,6 +49,15 @@ export function parseRetryAfterSec(text) {
   return null;
 }
 
+// retry-after may be delta-seconds ("120") or an HTTP-date; an HTTP-date is
+// deliberately not parsed here (clock skew turns it into a wrong wait), so it
+// degrades to null and the policy falls back to its default ladder.
+function parseRetryAfterHeaderValue(ra) {
+  if (!ra) return null;
+  const n = Math.ceil(parseFloat(ra));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 export function classifyText(text) {
   if (!text) return { kind: "other", retryAfterSec: null };
   if (ABORT_RE.test(text)) return { kind: "abort", retryAfterSec: null };
@@ -65,7 +76,7 @@ function fromStructured(error) {
   if (status === 429) {
     const headers = error.responseHeaders ?? error.data?.responseHeaders ?? {};
     const ra = headers["retry-after"] ?? headers["Retry-After"];
-    return { kind: "rate_limit", retryAfterSec: ra ? Math.ceil(parseFloat(ra)) : null };
+    return { kind: "rate_limit", retryAfterSec: parseRetryAfterHeaderValue(ra) };
   }
   if (status === 401 || status === 403) return { kind: "auth", retryAfterSec: null };
   if (status === 402) return { kind: "billing", retryAfterSec: null };
