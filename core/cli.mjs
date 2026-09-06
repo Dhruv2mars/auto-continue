@@ -262,24 +262,19 @@ async function runQueueCmd(cmd, args) {
     queueOut({ armed: false, session: sessionId, queued: 0, reason: "prompt must not be empty" });
     return { cmd, armed: false };
   }
-  let item;
-  try {
-    item = await enqueue(sessionId, prompt);
-  } catch (err) {
-    queueOut({ armed: false, session: sessionId, queued: (await listQueue(sessionId)).length, reason: String(err?.message || err) });
-    return { cmd, armed: false };
-  }
-  const items = await listQueue(sessionId);
   const state = await loadState(sessionId);
-
+  const items = await listQueue(sessionId);
   const cap = enqueueCap(args, harness);
+  const armedAt = state.watcherArmedAt ?? 0;
+  // Hard gates run before the write: a cap-blocked enqueue must not store a
+  // prompt it reports as rejected (nothing would ever drain it — the file
+  // would read as pending forever).
   if (state.continues >= cap) {
     const reason = `auto-continue reached its cap of ${cap} continuations for this session`;
     await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "queue_blocked", detail: reason });
     queueOut({ armed: false, session: sessionId, queued: items.length, reason });
     return { cmd, armed: false };
   }
-  const armedAt = state.watcherArmedAt ?? 0;
   if (armedAt && Date.now() - armedAt < DEDUPE_WINDOW_MS) {
     const etaSec = Math.ceil((DEDUPE_WINDOW_MS - (Date.now() - armedAt)) / 1000);
     const reason = `watcher already armed (retry in ${etaSec}s)`;
@@ -287,35 +282,42 @@ async function runQueueCmd(cmd, args) {
     queueOut({ armed: false, session: sessionId, queued: items.length, reason });
     return { cmd, armed: false };
   }
+  try {
+    await enqueue(sessionId, prompt);
+  } catch (err) {
+    queueOut({ armed: false, session: sessionId, queued: (await listQueue(sessionId)).length, reason: String(err?.message || err) });
+    return { cmd, armed: false };
+  }
+  const refreshed = await listQueue(sessionId);
   // One clear rule beyond the 120s hard block: the previous watcher may still
   // be sleeping (delays run up to maxWait), so arming a second sleeper while
   // the queue is already non-empty only stacks watchers on the same session.
   // The already-queued prompt(s) ride the first watcher; report armed:false.
   const maxWaitSec = effectiveMaxWaitSec(args);
-  if (armedAt && Date.now() - armedAt < maxWaitSec * 1000 && items.length > 1) {
+  if (armedAt && Date.now() - armedAt < maxWaitSec * 1000 && refreshed.length > 1) {
     const delay = enqueueDelaySec(args);
-    const reason = `watcher already queued (queue depth ${items.length}; resume in ~${delay}s)`;
+    const reason = `watcher already queued (queue depth ${refreshed.length}; resume in ~${delay}s)`;
     await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "queue_blocked", detail: reason });
-    queueOut({ armed: false, session: sessionId, queued: items.length, reason });
+    queueOut({ armed: false, session: sessionId, queued: refreshed.length, reason });
     return { cmd, armed: false };
   }
   const globalCount = await globalResumeCountToday(home);
   if (globalCount >= DAILY_RESUME_CEILING) {
     const reason = `daily resume ceiling (${DAILY_RESUME_CEILING}) reached`;
     await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "queue_blocked", detail: reason });
-    queueOut({ armed: false, session: sessionId, queued: items.length, reason });
+    queueOut({ armed: false, session: sessionId, queued: refreshed.length, reason });
     return { cmd, armed: false };
   }
   if (args.dry) {
     const reason = "dry run: prompt queued, watcher not armed";
     await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "queued", dry: true, detail: reason });
-    queueOut({ armed: false, session: sessionId, queued: items.length, reason });
+    queueOut({ armed: false, session: sessionId, queued: refreshed.length, reason });
     return { cmd, armed: false };
   }
   if (process.env.AUTO_CONTINUE_RESUME === "0") {
     const reason = "auto-resume disabled (AUTO_CONTINUE_RESUME=0)";
     await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "queued", detail: reason });
-    queueOut({ armed: false, session: sessionId, queued: items.length, reason });
+    queueOut({ armed: false, session: sessionId, queued: refreshed.length, reason });
     return { cmd, armed: false };
   }
   const delay = enqueueDelaySec(args);
@@ -323,7 +325,7 @@ async function runQueueCmd(cmd, args) {
   await saveState(sessionId, { ...state, watcherArmedAt: Date.now() });
   await bumpGlobalResumeCount(home);
   await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "watcher_armed", delaySec: delay });
-  queueOut({ armed: true, session: sessionId, queued: items.length, delaySec: delay, reason: `watcher armed, resume in ${delay}s` });
+  queueOut({ armed: true, session: sessionId, queued: refreshed.length, delaySec: delay, reason: `watcher armed, resume in ${delay}s` });
   return { cmd, armed: true, delaySec: delay };
 }
 

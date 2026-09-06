@@ -71,14 +71,16 @@ describe("queue cli", () => {
     expect(body.reason).toMatch(/empty/);
   });
 
-  test("dedupe window blocks second arm with ETA", () => {
+  test("dedupe window blocks second arm with ETA (prompt not stored)", () => {
     const env = { AUTO_CONTINUE_RESUME_CMD_CLAUDE: "true" };
     expect(out(runCli(["enqueue", "q2", "first"], env)).armed).toBe(true);
     const second = out(runCli(["enqueue", "q2", "second"], env));
     expect(second.armed).toBe(false);
     expect(second.reason).toMatch(/already armed/);
     expect(second.reason).toMatch(/retry in \d+s/);
-    expect(second.queued).toBe(2);
+    // Hard gate: a blocked enqueue must not store the prompt it rejects —
+    // nothing would ever drain it, so the file would read as pending forever.
+    expect(second.queued).toBe(1);
   });
 
   test("ceiling reached prints honest blocked reason", () => {
@@ -98,12 +100,16 @@ describe("queue cli", () => {
     expect(e.reason).toMatch(/AUTO_CONTINUE_RESUME=0/);
   });
 
-  test("flags still work: --max-continues 0 blocks, --dry queues without arming", () => {
+  test("flags still work: --max-continues 0 blocks (prompt not stored), --dry queues without arming", () => {
     const capped = out(
       runCli(["enqueue", "q5", "hi", "--max-continues", "0"], { AUTO_CONTINUE_RESUME_CMD_CLAUDE: "true" }),
     );
     expect(capped.armed).toBe(false);
     expect(capped.reason).toMatch(/cap/);
+    // Hard gate: cap-blocked means blocked — the prompt must not be written
+    // to a queue file nothing would ever drain.
+    expect(capped.queued).toBe(0);
+    expect(out(runCli(["list", "q5"]))).toEqual([]);
     const dry = out(runCli(["enqueue", "q6", "hi", "--dry"], { AUTO_CONTINUE_RESUME_CMD_CLAUDE: "true" }));
     expect(dry.armed).toBe(false);
     expect(dry.reason).toMatch(/dry run/);
