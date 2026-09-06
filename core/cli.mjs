@@ -17,10 +17,12 @@ import { classify } from "./lib/classify.mjs";
 import { decide, blockDecision, HARNESS_CAPS, DEFAULTS } from "./lib/policy.mjs";
 import { loadState, saveState, appendLog, sessionKey } from "./lib/state.mjs";
 import { enqueue, listQueue, clearQueue, restoreDraining, ackDraining, readDraining } from "./lib/queue.mjs";
+import { homeDir } from "./lib/state.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DRAIN_MJS = join(HERE, "drain.mjs");
 const DRAIN_ACK_MJS = join(HERE, "drain-ack.mjs");
+const DRAIN_SETTLE_MJS = join(HERE, "drain-settle.mjs");
 const PROBE_MJS = join(HERE, "probe.mjs");
 const CANNED_PROMPT = "Continue from where the turn was interrupted by the usage limit.";
 // Default resume consumes the drained queue file ($AC_PROMPT_FILE, exported
@@ -130,8 +132,11 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
   // expansion, so quotes/newlines in the prompt cannot inject). The default
   // template consumes the file via double-quoted $(cat ...) with a $2
   // fallback when empty; custom templates keep $1/$2 positionals and read
-  // stdin. Ack .draining only when the resume exits 0, else leave it for
-  // restore. AUTO_CONTINUE_HOME is inherited.
+  // stdin. The drain-settle helper owns the final state: ack .draining when
+  // the resume exits 0, restore it to the queue head when it exits nonzero.
+  // The template runs in a subshell so a resume that calls `exit N` fails
+  // only itself — an unwrapped `exit` would kill the watcher shell before
+  // settle runs and orphan the .draining head. AUTO_CONTINUE_HOME inherited.
   //
   // Probe-before-send: when a probe is configured, the wake first checks
   // quota (core/probe.mjs, override per harness with
@@ -145,7 +150,7 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
     (probeEnabled
       ? `backoff=${sq(backoff.join(" "))}; attempt=0; while [ "$attempt" -lt ${backoff.length} ]; do if ${sq(process.execPath)} ${sq(PROBE_MJS)} ${sq(harness)} >> "$3" 2>&1; then break; fi; wait_s=$(echo $backoff | cut -d' ' -f$((attempt + 1))); echo "probe: still limited; re-arming in ${"$"}{wait_s}s (attempt $((attempt + 1))/${backoff.length})" >> "$3"; sleep "$wait_s"; attempt=$((attempt + 1)); done; if [ "$attempt" -ge ${backoff.length} ]; then echo "probe: giving up (quota still limited); queue left intact" >> "$3"; exit 0; fi; `
       : ``) +
-    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; if [ -s "$AC_PROMPT_FILE" ]; then { ${resumeCmdTpl}; } < "$AC_PROMPT_FILE" && ${sq(process.execPath)} ${sq(DRAIN_ACK_MJS)} "$1" < /dev/null; else printf '%s' "$2" | { ${resumeCmdTpl}; }; fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
+    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; if [ -s "$AC_PROMPT_FILE" ]; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" begin < /dev/null; if ( ${resumeCmdTpl} ) < "$AC_PROMPT_FILE"; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" < /dev/null; else ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" fail < /dev/null; fi; else printf '%s' "$2" | ( ${resumeCmdTpl} ); fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
   const child = spawn("/bin/sh", ["-c", sh, "auto-continue", sessionId, prompt, logFile], { detached: true, stdio: "ignore" });
   child.unref();
   return true;
@@ -188,6 +193,22 @@ function enqueueCap(args, harness) {
 
 function queueOut(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
+}
+
+/** True while a watcher delivery for this session is in flight, proven by
+ * the drain-settle marker; a stale marker (watcher died mid-send) ages out
+ * after 10 minutes so the hook's ack path cannot be blocked forever. */
+async function settlingInProgress(sessionId) {
+  try {
+    const dir = join(homeDir(), "queue");
+    const markerPath = join(dir, `${sessionKey(sessionId)}.settling`);
+    const { stat } = await import("node:fs/promises");
+    const info = await stat(markerPath).catch(() => null);
+    if (!info) return false;
+    return Date.now() - info.mtimeMs < 10 * 60 * 1000;
+  } catch {
+    return false;
+  }
 }
 
 async function logQuiet(entry) {
@@ -371,9 +392,17 @@ export async function main(argv = process.argv.slice(2)) {
   // limit-classified stop: OVERLOADED takes the continue_now path above and
   // returns early, and ignore with continues===0 means no delivery happened,
   // so the head stays in flight for restore on the next limit.
+  //
+  // Unless a watcher delivery is still in flight (.settling marker): the
+  // resume command may still be running the head and could exit nonzero,
+  // which must restore the prompt — a mid-flight ack here would orphan it
+  // and lose the prompt for good. The settle helper acks or restores; a
+  // stale marker (watcher died mid-send) ages out after 10 minutes.
   if (decision.action === "ignore" && event === "stop" && state.continues !== 0) {
     await saveState(sessionId, { ...state, continues: 0 });
-    try { await ackDraining(sessionId); } catch {}
+    if (!await settlingInProgress(sessionId)) {
+      try { await ackDraining(sessionId); } catch {}
+    }
   }
   return decision;
 }

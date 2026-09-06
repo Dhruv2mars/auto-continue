@@ -78,12 +78,16 @@ describe("watcher defects", () => {
   });
 
   test("watcher acks .draining only when resume exits 0", async () => {
-    const { enqueue, drainHead, readDraining, list } = await import("../core/lib/queue.mjs");
-    // Failing resume (exit nonzero): .draining survives the watcher chain.
+    const { readDraining, list } = await import("../core/lib/queue.mjs");
+    // Failing resume (exit nonzero): the settle helper restores the head to
+    // the queue (.draining gone, prompt back at position 0) — never orphaned.
     const f = out(runCli(["enqueue", "wdef3", "must-restore"], { AUTO_CONTINUE_RESUME_CMD_CLAUDE: "false" }));
     expect(f.armed).toBe(true);
     await sleep(3000);
-    expect(JSON.parse(readFileSync(join(home, "queue", "wdef3.draining"), "utf8")).prompt).toBe("must-restore");
+    expect(await readDraining("wdef3")).toBeNull();
+    const q = await list("wdef3");
+    expect(q.length).toBe(1);
+    expect(q[0].prompt).toBe("must-restore");
   }, 20000);
 
   test("drain-ack helper drops a pending head; true-resume watcher acks", async () => {
