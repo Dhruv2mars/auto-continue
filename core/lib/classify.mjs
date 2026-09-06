@@ -16,14 +16,17 @@
 // when to *try again*; explanatory prose does neither.
 const RATE_LIMIT_RE = /usage limit (?:has been |was |is )?(?:reached|hit)|rate limit (?:has been |was |is )?(?:reached|exceeded|hit)|(?:reached|hit|exceeded) your (?:usage|rate|token|plan|weekly|daily) limit|you(?:'ve)? h(?:it|ave reached)|you have reached your|too many requests|quota (?:exceeded|exhausted|reached|limit)|your quota|quota is (?:exceeded|exhausted)|plan limit (?:has been |was )?(?:reached|hit)/i;
 const WEAK_LIMIT_RE = /\b(?:rate|usage|token|plan|weekly|daily|character|message) limit\b|usage cap|\b429\b/i;
-const LIMIT_CONTEXT_RE = /\b(?:you|your|you've|you'll|please|try|retry|resets?|wait|come back|later|paused?|temporarily)\b/i;
+// Corroboration must be the message addressing the user or scheduling the
+// retry — bare "you" also appears inside quoted prose ("unless you purchase
+// an enterprise plan"), so only possessive/imperative forms count.
+const LIMIT_CONTEXT_RE = /\b(?:your|you've|you'll|you have|you can|please|try again|retry|resets? (?:at|in|on)|wait|come back|later|paused?|temporarily)\b/i;
 const OVERLOAD_RE = /overloaded|over capacity|at capacity|529|server is busy|temporarily unavailable/i;
 const AUTH_RE = /invalid api key|unauthorized|authentication|401|forbidden|403|not authenticated/i;
 const BILLING_RE = /billing|credit|payment|insufficient funds|402|subscription/i;
 const ABORT_RE = /aborted|abortedbyuser|user interrupt|cancelled by user|canceled by user/i;
 
 const CLOCK_RE = /\b(?:resets?|reset)(?:\s+at|\s+by)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
-const RELATIVE_RE = /\b(?:retry|try) again (?:in|after)\s+(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)\b/i;
+const RELATIVE_RE = /\b(?:(?:retry|try) again|retry|try again) (?:in|after)\s+(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)\b/i;
 const DURATION_RE = /\bin\s+(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)\b/i;
 
 function secondsFromUnit(n, unit) {

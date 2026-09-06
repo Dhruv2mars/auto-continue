@@ -282,6 +282,27 @@ describe("classify round-2 fixes", () => {
     for (const text of texts) expect(classify({ text }).kind).toBe("other");
   });
 
+  test("bare 'you' inside quoted prose is not corroboration", () => {
+    // Regression: LIMIT_CONTEXT_RE matched \byou\b anywhere, so prose quoting
+    // a weak token plus an incidental 'you' armed the watcher.
+    const texts = [
+      "The rate limit applies per API key unless you purchase an enterprise plan.",
+      "The 429 error page shows users what they can do.",
+    ];
+    for (const text of texts) expect(classify({ text }).kind).toBe("other");
+    // Possessive/addressee forms still corroborate.
+    expect(classifyText("Your rate limit resets at 5pm.").kind).toBe("rate_limit");
+    expect(classifyText("You have hit your weekly limit. Try again later.").kind).toBe("rate_limit");
+  });
+
+  test("'retry after 60s' parses without 'again'", () => {
+    // Regression: RELATIVE_RE required 'again', so the common 'retry after
+    // Ns' phrasing fell through to the policy backoff floor.
+    expect(parseRetryAfterSec("429 Too Many Requests, retry after 60s")).toBe(60);
+    expect(parseRetryAfterSec("429 Too Many Requests. Please try again in 60 seconds.")).toBe(60);
+    expect(parseRetryAfterSec("Error 429: retry-after: 120")).toBe(120);
+  });
+
   test("real limit messages that name the limit explicitly still classify rate_limit", () => {
     expect(classifyText("You have reached your usage limit. Your limit will reset at 5:00pm.").kind).toBe("rate_limit");
     expect(classifyText("usage limit reached").kind).toBe("rate_limit");
