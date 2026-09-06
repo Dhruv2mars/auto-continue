@@ -117,13 +117,17 @@ async function resolveResumeText(sessionID) {
   }
 }
 
-async function disarmDisk(sessionID) {
+async function disarmDisk(sessionID, resetContinues = false) {
   try {
     const st = await loadState(sessionID);
     const next = { ...st };
     delete next.armedAt;
     delete next.delaySec;
     delete next.baseline;
+    // A successful resume hands the turn back: reset the continuation
+    // counter like the hook path's healthy-stop reset, else a long-lived
+    // session give_ups forever once the cap is hit.
+    if (resetContinues) next.continues = 0;
     await saveState(sessionID, next);
   } catch {}
 }
@@ -149,7 +153,7 @@ async function sendResume(client, sessionID) {
     pending.delete(sessionID);
     try {
       const st = await loadState(sessionID);
-      await disarmDisk(sessionID);
+      await disarmDisk(sessionID, true);
       await appendLog({ harness: "opencode", event: "resumed", session: sessionID, kind: "rate_limit", source: "policy", action: "resumed", continues: st.continues ?? null, delivered: source });
       return { text, source, continues: st.continues ?? null };
     } catch {

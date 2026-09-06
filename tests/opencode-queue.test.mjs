@@ -28,6 +28,10 @@ async function queueApi() {
   return import(`../adapters/opencode/core/queue.mjs?t=${Date.now()}-${Math.random()}`);
 }
 
+async function stateApi() {
+  return import(`../adapters/opencode/core/state.mjs?t=${Date.now()}-${Math.random()}`);
+}
+
 function quotaError(sessionID, retryAfter = "1") {
   return {
     type: "session.error",
@@ -101,6 +105,30 @@ describe("opencode queue resume", () => {
     // Let any stray second send land if the guard failed.
     await new Promise((r) => setTimeout(r, 300));
     expect(prompts.length).toBe(1);
+  });
+
+  test("successful resume resets continues (healthy-turn reset, no permanent give_up)", async () => {
+    process.env.AUTO_CONTINUE_MIN_DELAY = "0";
+    const { enqueue } = await queueApi();
+    const { saveState, loadState } = await stateApi();
+    await enqueue("q-reset", "reset-my-counter");
+    // One below the opencode cap (2): this arm is the session's last without
+    // a reset, so delivery MUST zero the counter.
+    await saveState("q-reset", { continues: 1, armedAt: 0, updatedAt: 0 });
+    const plugin = await freshPlugin(makeClient());
+    // retryAfter "0" -> the next idle is due immediately (no parked timer
+    // leaking past this test).
+    await plugin.event({ event: quotaError("q-reset", "0") });
+    // The arm still persisted (armedAt written by the error path).
+    const armed = await loadState("q-reset");
+    expect(armed.armedAt).toBeTruthy();
+    await plugin.event({ event: idle("q-reset") });
+    expect(prompts.length).toBe(1);
+    // Delivery = turn handed back cleanly: counter reset to 0 so the next
+    // limit episode re-arms instead of give_uping forever.
+    const st = await loadState("q-reset");
+    expect(st.continues).toBe(0);
+    expect(st.armedAt).toBeUndefined();
   });
 
   test("restart restores armed state from disk", async () => {
