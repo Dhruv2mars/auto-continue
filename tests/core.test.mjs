@@ -271,6 +271,17 @@ describe("classify round-2 fixes", () => {
     for (const text of texts) expect(classify({ text }).kind).toBe("other");
   });
 
+  test("benign prose merely mentioning limit vocabulary does not classify rate_limit", () => {
+    // Regression: weak tokens ('rate limit', '429') matched explanatory
+    // prose; they now need addressee/retry/reset corroboration.
+    const texts = [
+      "Next I will discuss the rate limit headers documented in the API docs.",
+      "The 429 status code is returned when a client exceeds its allowance in a window.",
+      "The rate limit configuration lives in the config file.",
+    ];
+    for (const text of texts) expect(classify({ text }).kind).toBe("other");
+  });
+
   test("real limit messages that name the limit explicitly still classify rate_limit", () => {
     expect(classifyText("You have reached your usage limit. Your limit will reset at 5:00pm.").kind).toBe("rate_limit");
     expect(classifyText("usage limit reached").kind).toBe("rate_limit");

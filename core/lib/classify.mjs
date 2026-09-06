@@ -8,9 +8,15 @@
 // Limit idioms only: bare nouns like "quota" or "capacity" appear constantly
 // in benign assistant prose ("the quota of open files per process"), and
 // wildcard spans like /limit.*reached/ match ordinary sentences ("once the
-// 100th row is reached, we apply a limit"), so this list stays literal:
-// fixed phrases, and limit-noun + reached/failed within a short window.
-const RATE_LIMIT_RE = /rate limit|usage limit|usage cap|token limit|429|too many requests|quota (?:exceeded|exhausted|reached|limit)|your quota|quota is (?:exceeded|exhausted)|plan limit|weekly limit|daily limit|(?:usage|rate|token|plan|weekly|daily|character|message) limit (?:has been )?(?:reached|hit)|(?:reached|hit) your (?:usage|rate|token|plan|weekly|daily) limit/i;
+// 100th row is reached, we apply a limit"), so this list stays literal.
+// Strong idioms assert the limit event itself. Weak tokens (WEAK_LIMIT_RE)
+// merely mention limit vocabulary ("next I will discuss the rate limit
+// headers") and only classify when corroborated by addressee/retry/reset
+// language (LIMIT_CONTEXT_RE) — real limit messages talk to *you* and say
+// when to *try again*; explanatory prose does neither.
+const RATE_LIMIT_RE = /usage limit (?:has been |was |is )?(?:reached|hit)|rate limit (?:has been |was |is )?(?:reached|exceeded|hit)|(?:reached|hit|exceeded) your (?:usage|rate|token|plan|weekly|daily) limit|you(?:'ve)? h(?:it|ave reached)|you have reached your|too many requests|quota (?:exceeded|exhausted|reached|limit)|your quota|quota is (?:exceeded|exhausted)|plan limit (?:has been |was )?(?:reached|hit)/i;
+const WEAK_LIMIT_RE = /\b(?:rate|usage|token|plan|weekly|daily|character|message) limit\b|usage cap|\b429\b/i;
+const LIMIT_CONTEXT_RE = /\b(?:you|your|you've|you'll|please|try|retry|resets?|wait|come back|later|paused?|temporarily)\b/i;
 const OVERLOAD_RE = /overloaded|over capacity|at capacity|529|server is busy|temporarily unavailable/i;
 const AUTH_RE = /invalid api key|unauthorized|authentication|401|forbidden|403|not authenticated/i;
 const BILLING_RE = /billing|credit|payment|insufficient funds|402|subscription/i;
@@ -63,7 +69,8 @@ export function classifyText(text) {
   if (ABORT_RE.test(text)) return { kind: "abort", retryAfterSec: null };
   if (AUTH_RE.test(text)) return { kind: "auth", retryAfterSec: null };
   if (BILLING_RE.test(text)) return { kind: "billing", retryAfterSec: null };
-  if (RATE_LIMIT_RE.test(text)) return { kind: "rate_limit", retryAfterSec: parseRetryAfterSec(text) };
+  const limitHit = RATE_LIMIT_RE.test(text) || (WEAK_LIMIT_RE.test(text) && LIMIT_CONTEXT_RE.test(text));
+  if (limitHit) return { kind: "rate_limit", retryAfterSec: parseRetryAfterSec(text) };
   if (OVERLOAD_RE.test(text)) return { kind: "overloaded", retryAfterSec: parseRetryAfterSec(text) };
   return { kind: "other", retryAfterSec: null };
 }
