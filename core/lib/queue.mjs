@@ -4,11 +4,16 @@
  * Watcher wake drains the head (moved to .draining first for crash safety)
  * and sends it as the resume prompt; empty queue falls back to canned text.
  */
-import { chmod, mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join, dirname } from "node:path";
 import { homeDir, sessionKey } from "./state.mjs";
 
 export const MAX_PROMPT_LEN = 8000;
+
+// A delivery whose .settling marker is older than this is presumed orphaned
+// (watcher killed mid-send); the stale branch restores rather than drops.
+const SETTLING_MAX_AGE_MS = 10 * 60 * 1000;
 
 function queueDir() {
   return join(homeDir(), "queue");
@@ -78,11 +83,16 @@ export async function enqueue(sessionId, prompt) {
   if (!text.trim()) throw new Error("prompt must not be empty");
   if (text.length > MAX_PROMPT_LEN) throw new Error(`prompt exceeds ${MAX_PROMPT_LEN} chars`);
   await ensureQueueDir();
-  const items = await list(sessionId);
-  const item = { prompt: text, queuedAt: Date.now() };
-  items.push(item);
-  await atomicWrite(queuePath(sessionId), JSON.stringify(items));
-  return item;
+  // Locked read-modify-write: concurrent CLI enqueues share this path and a
+  // bare list->push->write lets the last rename win, silently dropping the
+  // other writers' prompts.
+  return withQueueLock(sessionId, async () => {
+    const items = await list(sessionId);
+    const item = { prompt: text, queuedAt: Date.now() };
+    items.push(item);
+    await atomicWrite(queuePath(sessionId), JSON.stringify(items));
+    return item;
+  });
 }
 
 export async function peekHead(sessionId) {
@@ -184,3 +194,111 @@ export const readQueue = list;
 export const listQueue = list;
 export const clearQueue = clear;
 export const readDraining = readDrainingRaw;
+
+/**
+ * Cross-process serialization for queue mutators. A lock file is mandatory
+ * on enqueue and held across list->write: concurrent CLI enqueues did a bare
+ * read-modify-write and silently dropped each other's prompts. Best-effort:
+ * on contention we retry briefly, then proceed unlocked (rare lost update)
+ * rather than fail the enqueue — the alias/lock state is advisory data.
+ */
+const LOCK_TIMEOUT_MS = 2000;
+
+export async function withQueueLock(sessionId, fn) {
+  const dir = queueDir();
+  await mkdir(dir, { recursive: true });
+  const lockPath = join(dir, `${sessionKey(sessionId)}.lock`);
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let locked = false;
+  while (Date.now() < deadline) {
+    try {
+      await writeFile(lockPath, String(process.pid), { flag: "wx" });
+      locked = true;
+      break;
+    } catch {
+      await new Promise((r) => setTimeout(r, 25));
+    }
+  }
+  if (!locked) {
+    // Stale lock: steal it rather than block the queue forever.
+    await rm(lockPath, { force: true });
+    try {
+      await writeFile(lockPath, String(process.pid), { flag: "wx" });
+      locked = true;
+    } catch {}
+  }
+  try {
+    return await fn();
+  } finally {
+    if (locked) await unlink(lockPath).catch(() => {});
+  }
+}
+
+/** Short fingerprint identifying a prompt across drain/settle/queue files. */
+export function promptFingerprint(text) {
+  return createHash("sha256").update(String(text ?? "")).digest("hex").slice(0, 16);
+}
+
+async function markerInfo(sessionId) {
+  const path = join(queueDir(), `${sessionKey(sessionId)}.settling`);
+  try {
+    const info = await stat(path);
+    const fresh = Date.now() - info.mtimeMs < SETTLING_MAX_AGE_MS;
+    let fp = null;
+    try {
+      fp = (await readFile(path, "utf8")).trim().split(" ")[1] || null;
+    } catch {}
+    return { fresh, fp };
+  } catch {
+    return { fresh: false, fp: null };
+  }
+}
+
+/**
+ * Drop the queue HEAD only when it is the exact prompt a settled delivery
+ * carried (fingerprint from the .settling marker). This converges the
+ * stale-marker path: the hook restored a delivery that then succeeded, and
+ * without this drop the sent prompt would be re-delivered on the next wake.
+ * A mismatch (a different prompt was enqueued meanwhile) keeps the queue.
+ */
+export async function dropIfMarked(sessionId, fingerprint) {
+  if (!fingerprint) return false;
+  return withQueueLock(sessionId, async () => {
+    const items = await list(sessionId);
+    if (!items.length) return false;
+    if (promptFingerprint(items[0].prompt) !== fingerprint) return false;
+    const rest = items.slice(1);
+    if (rest.length === 0) await unlink(queuePath(sessionId)).catch(() => {});
+    else await atomicWrite(queuePath(sessionId), JSON.stringify(rest));
+    return true;
+  });
+}
+
+/**
+ * Watcher-wake drain with ownership: refuses while a delivery for this
+ * session is provably in flight (fresh .settling marker from another wake —
+ * two live watchers, e.g. a probing one and a re-armed one, must not
+ * restore-and-re-drain the same head). A stale marker means its watcher is
+ * presumed dead: the wake takes over. On take-over the pending .draining
+ * head is restored first (true FIFO), then the new head is drained and the
+ .settling marker written atomically-with the claim (same lock), so a
+ * sibling wake can never slip into the drain-to-begin window. Returns
+ * {head} when this wake owns the delivery (marker already written), or
+ * {head:null} when the queue is empty — the canned fallback send is owned
+ * the same way, so concurrent wakes cannot both send it.
+ */
+export async function drainIfUnowned(sessionId) {
+  return withQueueLock(sessionId, async () => {
+    const marker = await markerInfo(sessionId);
+    if (marker.fresh) return { skipped: true, why: "delivery in flight" };
+    await restoreDraining(sessionId);
+    const head = await drainHead(sessionId);
+    // Own the delivery (or the canned fallback) immediately: the marker is
+    // what sibling wakes check, and drain-settle begin re-stamps it with the
+    // same fingerprint at send time.
+    const fp = head ? promptFingerprint(head.prompt) : promptFingerprint("");
+    const markerPath = join(queueDir(), `${sessionKey(sessionId)}.settling`);
+    await atomicWrite(markerPath, `${Date.now()} ${fp}`);
+    return { head, fingerprint: fp };
+  });
+}

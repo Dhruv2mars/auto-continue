@@ -1,12 +1,14 @@
 /**
  * Round-2 hostile e2e repro: a wake with a pending .draining item (previous
  * watcher crashed mid-send) must restore it and drain FIFO, not fall back to
- * the canned prompt while real prompts sit queued. All state stays in a temp
- * AUTO_CONTINUE_HOME; never touches ~/.auto-continue.
+ * the canned prompt while real prompts sit queued. Round-4 update: drain is
+ * ownership-aware, so each wake must clear the previous wake's settling
+ * marker first (a live marker = another watcher owns the delivery). All
+ * state stays in a temp AUTO_CONTINUE_HOME; never touches ~/.auto-continue.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { enqueue, drainHead, listQueue, readDraining } from "../core/lib/queue.mjs";
@@ -20,6 +22,18 @@ function drainCli(sessionId) {
     cwd: import.meta.dir,
     encoding: "utf8",
   });
+}
+
+function settleCli(sessionId, mode = "") {
+  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode], {
+    env: { ...process.env, AUTO_CONTINUE_HOME: home },
+    cwd: import.meta.dir,
+    encoding: "utf8",
+  });
+}
+
+function markerPath(sid) {
+  return join(home, "queue", `${sid}.settling`);
 }
 
 beforeEach(() => {
@@ -52,12 +66,12 @@ describe("round-2: wake with pending .draining restores FIFO", () => {
     expect(d1.stdout.toString()).toBe("interrupted-prompt-xyz");
     expect(await readDraining(sid)).not.toBeNull();
 
-    // The resume exits 0 -> settle acks; wake 2 delivers the second prompt.
-    const { ackDraining } = await import("../core/lib/queue.mjs");
-    await ackDraining(sid);
+    // The resume exits 0 -> settle acks (and clears the marker); wake 2
+    // delivers the second prompt.
+    await settleCli(sid);
     const d2 = drainCli(sid);
     expect(d2.stdout.toString()).toBe("second-prompt");
-    await ackDraining(sid);
+    await settleCli(sid);
 
     // Genuinely empty queue: empty output is the canned fallback signal.
     const d3 = drainCli(sid);
@@ -65,5 +79,8 @@ describe("round-2: wake with pending .draining restores FIFO", () => {
     expect(d3.stdout.toString()).toBe("");
     expect((await listQueue(sid)).length).toBe(0);
     expect(await readDraining(sid)).toBeNull();
+    expect(existsSync(markerPath(sid))).toBe(true); // canned send owned
+    await settleCli(sid);
+    expect(existsSync(markerPath(sid))).toBe(false);
   });
 });
