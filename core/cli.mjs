@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { classify } from "./lib/classify.mjs";
 import { decide, blockDecision, HARNESS_CAPS, DEFAULTS } from "./lib/policy.mjs";
 import { loadState, saveState, appendLog, sessionKey } from "./lib/state.mjs";
-import { enqueue, listQueue, clearQueue, restoreDraining, ackDraining, readDraining } from "./lib/queue.mjs";
+import { enqueue, listQueue, clearQueue, restoreDraining, readDraining } from "./lib/queue.mjs";
 import { homeDir } from "./lib/state.mjs";
 import { detectHarness } from "./lib/harness.mjs";
 
@@ -290,6 +290,17 @@ async function runQueueCmd(cmd, args) {
     return { cmd, armed: false };
   }
   const refreshed = await listQueue(sessionId);
+  // A fresh .settling marker proves a delivery is in flight: its .draining
+  // head is owned by that watcher's settle, and the dedupe window cannot be
+  // trusted to cover long deliveries (probe ladders run 45/300/1800s). The
+  // prompt is stored (it drains FIFO after the in-flight settle) but no
+  // second watcher is armed — that would re-drain the same head.
+  if (await settlingInProgress(sessionId)) {
+    const reason = "delivery in flight; prompt queued for the next wake";
+    await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "queued", detail: reason });
+    queueOut({ armed: false, session: sessionId, queued: refreshed.length, reason });
+    return { cmd, armed: false };
+  }
   // One clear rule beyond the 120s hard block: the previous watcher may still
   // be sleeping (delays run up to maxWait), so arming a second sleeper while
   // the queue is already non-empty only stacks watchers on the same session.
@@ -378,7 +389,15 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   if (decision.action === "resume_later") {
-    try { await restoreDraining(sessionId); } catch {}
+    // A fresh .settling marker proves a delivery is in flight: the .draining
+    // head is owned by that watcher's settle (ack or restore). Restoring or
+    // re-arming here would re-drain the same head — a duplicate delivery and
+    // a stranded prompt. Stale/no marker (watcher presumed dead) proceeds:
+    // the restore is the crash recovery, and drain.mjs re-drains FIFO.
+    const deliveryInFlight = await settlingInProgress(sessionId);
+    if (!deliveryInFlight) {
+      try { await restoreDraining(sessionId); } catch {}
+    }
     const canResume = !args.dry && process.env.AUTO_CONTINUE_RESUME !== "0";
     const resumeCmd = process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`];
     // The claude template is claude-only: another harness with no explicit
@@ -388,19 +407,21 @@ export async function main(argv = process.argv.slice(2)) {
     const recentlyArmed = state.watcherArmedAt && Date.now() - state.watcherArmedAt < DEDUPE_WINDOW_MS;
     const globalCount = await globalResumeCountToday(home);
     const overCeiling = globalCount >= DAILY_RESUME_CEILING;
-    const spawned = canResume && hasTemplate && !recentlyArmed && !overCeiling
+    const spawned = canResume && hasTemplate && !deliveryInFlight && !recentlyArmed && !overCeiling
       ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd })
       : false;
     await saveState(sessionId, { ...state, continues: decision.continueIndex, watcherArmedAt: spawned ? Date.now() : state.watcherArmedAt });
     if (spawned) await bumpGlobalResumeCount(home);
     if (!spawned) {
-      const why = recentlyArmed
-        ? "watcher already armed"
-        : overCeiling
-          ? `daily resume ceiling (${DAILY_RESUME_CEILING}) reached`
-          : !hasTemplate
-            ? `no AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()} configured; set it to enable detached resume`
-            : "auto-resume disabled or unsupported harness";
+      const why = deliveryInFlight
+        ? "delivery in flight"
+        : recentlyArmed
+          ? "watcher already armed"
+          : overCeiling
+            ? `daily resume ceiling (${DAILY_RESUME_CEILING}) reached`
+            : !hasTemplate
+              ? `no AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()} configured; set it to enable detached resume`
+              : "auto-resume disabled or unsupported harness";
       process.stderr.write(`[auto-continue] ${decision.reason} (${why})\n`);
     }
     return { ...decision, spawned };
@@ -420,15 +441,16 @@ export async function main(argv = process.argv.slice(2)) {
   // returns early, and ignore with continues===0 means no delivery happened,
   // so the head stays in flight for restore on the next limit.
   //
-  // Unless a watcher delivery is still in flight (.settling marker): the
-  // resume command may still be running the head and could exit nonzero,
-  // which must restore the prompt — a mid-flight ack here would orphan it
-  // and lose the prompt for good. The settle helper acks or restores; a
-  // stale marker (watcher died mid-send) ages out after 10 minutes.
+  // While a delivery is provably in flight (fresh .settling marker) the head
+  // is owned by the watcher's settle: ack would orphan a resume about to
+  // fail. A STALE marker is ambiguous (dead watcher vs slow resume), so the
+  // head is restored instead of dropped — settle then no-ops on success, and
+  // a resume that exits nonzero finds its prompt already back. The hook never
+  // drops a head; only drain-settle (which saw the exit code) does.
   if (decision.action === "ignore" && event === "stop" && state.continues !== 0) {
     await saveState(sessionId, { ...state, continues: 0 });
     if (!await settlingInProgress(sessionId)) {
-      try { await ackDraining(sessionId); } catch {}
+      try { await restoreDraining(sessionId); } catch {}
     }
   }
   return decision;
