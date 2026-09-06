@@ -36,7 +36,10 @@ function out(proc) {
 function waitFor(path, ms = 8000) {
   const start = Date.now();
   return (async () => {
-    while (!existsSync(path)) {
+    // Content, not existence: `cat >> file` can be observed between
+    // open(O_CREAT) and the write landing, so an existence-only poll races
+    // the reader and flakes on an empty file.
+    while (!existsSync(path) || readFileSync(path, "utf8").length === 0) {
       if (Date.now() - start > ms) throw new Error(`timeout waiting for ${path}`);
       await new Promise((r) => setTimeout(r, 100));
     }
