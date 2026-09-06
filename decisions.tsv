@@ -33,3 +33,4 @@ r3-fix-classify	commit:dc90290	bare 'you' not corroboration (possessive/imperati
 r3-fix-ocreset	commit:4fdad2a	opencode disarmDisk resets continues on successful resume (healthy-turn reset parity)	10 opencode tests green; 119 green
 r4-fix-ownership	commit:b460c35	withQueueLock around queue mutators; drainIfUnowned claims .settling under lock (exit 3 = stand down); marker carries prompt fingerprint, settle drops matched head (stale-restore+success converges)	round4-ownership 3 e2e green (12/12 concurrent enqueues, refusal exit 3, converge, mismatch kept); 123 green
 r4-fix-flakes	commit:049a004	queue-cli waits marker clear; round3 m4 waits settled outcome	2 judge-flagged flakes closed
+r5-fix-protocol	commit:75aaaa5	identity-based convergence (.restored receipt), begin-file byte-exact fp, canned path no marker, giveup arm token, pid-liveness lock steal, locked clear	round5-lock 4 green; round4/round3/round2 e2e suites green; 127 green
