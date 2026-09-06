@@ -142,6 +142,11 @@ async function sendResume(client, sessionID) {
     try {
       await ackDraining(sessionID);
     } catch {}
+    // Success is the latest truth: drop any in-memory arm a concurrent
+    // session.error created while this send was in flight. A genuine new
+    // limit re-arms through a fresh error event; leaving the stale entry
+    // would re-deliver the same prompt on the next idle.
+    pending.delete(sessionID);
     try {
       const st = await loadState(sessionID);
       await disarmDisk(sessionID);
@@ -238,9 +243,11 @@ export const AutoContinue = async ({ client }) => {
             released = false;
           }
           // Best-effort: user typed first -> stand down, never prompt over them.
-          // The entry claim is held throughout, and the timer callback
-          // re-checks the latest parked props, so user evidence arriving
-          // during an in-flight send still cancels instead of being discarded.
+          // The entry claim is held throughout. Parked props are re-checked by
+          // the timer callback before it claims the slot; once a send is truly
+          // in flight, user evidence cannot retroactively cancel it — but the
+          // send path drops the pending entry on success, so a parked idle
+          // after it sees no arm and stands down.
           const standDown = async () => {
             if (armed.timer) {
               try {

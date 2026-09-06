@@ -197,4 +197,24 @@ describe("opencode parked-timer races (round-2)", () => {
     expect(prompts.length).toBe(1);
     expect(prompts[0].id).toBe("q-timer");
   }, 10000);
+
+  test("session.error during in-flight send cannot resurrect a stale arm into a second send", async () => {
+    process.env.AUTO_CONTINUE_MIN_DELAY = "1";
+    const client = makeClient({ delayMs: 300 });
+    const plugin = await freshPlugin(client);
+    const { enqueue } = await queueApi();
+    await enqueue("dup", "run-the-migration");
+    await plugin.event({ event: quotaError("dup", "1") });
+    await new Promise((r) => setTimeout(r, 30));
+    await plugin.event({ event: idle("dup") });
+    await new Promise((r) => setTimeout(r, 1030)); // timer fired, send in flight
+    // Genuine second limit arrives while the first send is still awaiting
+    // promptAsync: restore+re-arm must not survive the in-flight success.
+    await plugin.event({ event: quotaError("dup", "1") });
+    await new Promise((r) => setTimeout(r, 600)); // first send completes
+    await plugin.event({ event: idle("dup") });
+    await new Promise((r) => setTimeout(r, 1500));
+    expect(prompts.length).toBe(1);
+    expect(prompts[0].text).toBe("run-the-migration");
+  }, 10000);
 });
