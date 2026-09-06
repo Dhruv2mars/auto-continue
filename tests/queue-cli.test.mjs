@@ -45,6 +45,16 @@ function waitFor(path, ms = 5000) {
   })();
 }
 
+function waitForAbsent(path, ms = 8000) {
+  const start = Date.now();
+  return (async () => {
+    while (existsSync(path)) {
+      if (Date.now() - start > ms) throw new Error(`timeout waiting for ${path} to clear`);
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  })();
+}
+
 describe("queue cli", () => {
   test("enqueue stores + arms, list shows, clear drops", () => {
     const e = runCli(["enqueue", "q1", "hello", "world"], { AUTO_CONTINUE_RESUME_CMD_CLAUDE: "true" });
@@ -136,6 +146,10 @@ describe("queue cli", () => {
     const e = out(runCli(["enqueue", "q8", "only one"], env));
     expect(e.armed).toBe(true);
     await waitFor(got);
+    // Wait for the watcher's settle to finish (marker gone) — drain.mjs
+    // refuses while a delivery owns the session, and racing it inside the
+    // in-flight window made this test flake under parallel load.
+    await waitForAbsent(join(home, "queue", "q8.settling"));
     // Manually re-arm with an empty queue: hook path is covered by resume tests,
     // so exercise the drain helper directly for the fallback branch.
     const d = Bun.spawnSync(["node", join(import.meta.dir, "..", "core", "drain.mjs"), "q8"], {

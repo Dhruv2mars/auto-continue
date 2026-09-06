@@ -144,10 +144,11 @@ describe("round-3: settling marker owns the .draining head", () => {
     const env = { AUTO_CONTINUE_RESUME_CMD_CLAUDE: "true" };
     const e = JSON.parse(runCli(["enqueue", sid, "quick-head"], env).stdout.toString());
     expect(e.armed).toBe(true);
-    // Watcher wakes, drains, resume "true" exits 0: settle acks. Wait for the
-    // marker to appear (delivery began) and then vanish (settled ok).
-    expect(await until(() => existsSync(markerPath(sid)), 50, 100)).toBe(true);
-    expect(await until(async () => !existsSync(markerPath(sid)) && (await readDraining(sid)) === null, 80, 100)).toBe(true);
-    expect((await listQueue(sid)).length).toBe(0);
+    // Watcher wakes, drains, resume "true" exits 0, settle acks — possibly
+    // faster than any marker poll can observe. Wait on the settled OUTCOME
+    // (head gone from queue and draining), never on marker visibility.
+    expect(await until(async () =>
+      (await listQueue(sid)).length === 0 && (await readDraining(sid)) === null, 100, 100)).toBe(true);
+    expect(existsSync(markerPath(sid))).toBe(false);
   }, 20000);
 });
