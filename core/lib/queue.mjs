@@ -101,12 +101,16 @@ export async function peekHead(sessionId) {
 }
 
 export async function clear(sessionId) {
-  const items = await list(sessionId);
-  let n = items.length;
-  if (await exists(drainingPath(sessionId))) n += 1;
-  await unlink(queuePath(sessionId)).catch(() => {});
-  await unlink(drainingPath(sessionId)).catch(() => {});
-  return n;
+  // Serialized like every mutator: an unlocked clear let a concurrent
+  // enqueue's write land after it and resurrect the cleared prompts.
+  return withQueueLock(sessionId, async () => {
+    const items = await list(sessionId);
+    let n = items.length;
+    if (await exists(drainingPath(sessionId))) n += 1;
+    await unlink(queuePath(sessionId)).catch(() => {});
+    await unlink(drainingPath(sessionId)).catch(() => {});
+    return n;
+  });
 }
 
 async function readDrainingRaw(sessionId) {
@@ -196,13 +200,26 @@ export const clearQueue = clear;
 export const readDraining = readDrainingRaw;
 
 /**
- * Cross-process serialization for queue mutators. A lock file is mandatory
- * on enqueue and held across list->write: concurrent CLI enqueues did a bare
- * read-modify-write and silently dropped each other's prompts. Best-effort:
- * on contention we retry briefly, then proceed unlocked (rare lost update)
- * rather than fail the enqueue — the alias/lock state is advisory data.
+ * Cross-process serialization for queue mutators. A lock file carrying the
+ * holder pid guards enqueue/drain/clear critical sections. Contention waits;
+ * a lock is stolen ONLY when its recorded pid is provably dead (kill(pid,0)
+ * fails) — stealing a live holder's lock collapsed mutual exclusion and
+ * lost prompts. On timeout the mutator fails loudly (honest CLI error)
+ * rather than writing unlocked.
  */
-const LOCK_TIMEOUT_MS = 2000;
+const LOCK_TIMEOUT_MS = 5000;
+
+async function holderAlive(lockPath) {
+  try {
+    const pid = parseInt(await readFile(lockPath, "utf8"), 10);
+    if (!Number.isInteger(pid) || pid <= 0) return false; // corrupt -> stealable
+    process.kill(pid, 0); // signal 0 = liveness probe
+    return true;
+  } catch (err) {
+    if (err?.code === "ESRCH") return false; // pid gone -> stealable
+    return err?.code === "EPERM"; // exists but signaled refused -> alive
+  }
+}
 
 export async function withQueueLock(sessionId, fn) {
   const dir = queueDir();
@@ -216,21 +233,19 @@ export async function withQueueLock(sessionId, fn) {
       locked = true;
       break;
     } catch {
+      if (!(await holderAlive(lockPath))) {
+        // Holder provably dead: steal and retry the O_EXCL claim.
+        await rm(lockPath, { force: true });
+        continue;
+      }
       await new Promise((r) => setTimeout(r, 25));
     }
   }
-  if (!locked) {
-    // Stale lock: steal it rather than block the queue forever.
-    await rm(lockPath, { force: true });
-    try {
-      await writeFile(lockPath, String(process.pid), { flag: "wx" });
-      locked = true;
-    } catch {}
-  }
+  if (!locked) throw new Error(`queue busy: lock for ${sessionId} held by a live process`);
   try {
     return await fn();
   } finally {
-    if (locked) await unlink(lockPath).catch(() => {});
+    await unlink(lockPath).catch(() => {});
   }
 }
 
@@ -254,16 +269,43 @@ async function markerInfo(sessionId) {
   }
 }
 
+function restoredPath(sessionId) {
+  return join(queueDir(), `${sessionKey(sessionId)}.restored`);
+}
+
 /**
- * Drop the queue HEAD only when it is the exact prompt a settled delivery
- * carried (fingerprint from the .settling marker). This converges the
- * stale-marker path: the hook restored a delivery that then succeeded, and
- * without this drop the sent prompt would be re-delivered on the next wake.
- * A mismatch (a different prompt was enqueued meanwhile) keeps the queue.
+ * Hook-side stale-restore receipt: the hook restored a .draining head whose
+ * settling marker read stale (watcher presumed dead). The delivery may still
+ * be alive and about to succeed — settle drops a head matching THIS receipt,
+ * so identity, not marker liveness, drives the convergence. A receipt is
+ * only honored by the settle of the delivery whose marker it was written for
+ * (the settle reads it before removing its marker).
  */
-export async function dropIfMarked(sessionId, fingerprint) {
+export async function markRestored(sessionId, fingerprint) {
+  if (!fingerprint) return;
+  await mkdir(queueDir(), { recursive: true });
+  await atomicWrite(restoredPath(sessionId), String(fingerprint));
+}
+
+/**
+ * Settle-side convergence: drop the queue HEAD only when a hook restore
+ * receipt matches the delivered prompt's fingerprint (the hook restored a
+ * delivery that then succeeded — without the drop the sent prompt would be
+ * re-delivered on the next wake). Unconditional on marker age: the receipt
+ * identifies WHICH prompt, not liveness. A mismatch (a different prompt was
+ * enqueued meanwhile) keeps the queue.
+ */
+export async function dropIfRestored(sessionId, fingerprint) {
   if (!fingerprint) return false;
   return withQueueLock(sessionId, async () => {
+    let receipt = null;
+    try {
+      receipt = (await readFile(restoredPath(sessionId), "utf8")).trim();
+    } catch {
+      return false;
+    }
+    await unlink(restoredPath(sessionId)).catch(() => {});
+    if (receipt !== fingerprint) return false;
     const items = await list(sessionId);
     if (!items.length) return false;
     if (promptFingerprint(items[0].prompt) !== fingerprint) return false;
@@ -281,11 +323,14 @@ export async function dropIfMarked(sessionId, fingerprint) {
  * restore-and-re-drain the same head). A stale marker means its watcher is
  * presumed dead: the wake takes over. On take-over the pending .draining
  * head is restored first (true FIFO), then the new head is drained and the
- .settling marker written atomically-with the claim (same lock), so a
- * sibling wake can never slip into the drain-to-begin window. Returns
- * {head} when this wake owns the delivery (marker already written), or
- * {head:null} when the queue is empty — the canned fallback send is owned
- * the same way, so concurrent wakes cannot both send it.
+ * .settling marker written atomically-with the claim (same lock), so a
+ * sibling wake can never slip into the drain-to-begin window. The marker is
+ * stamped for a REAL head only — the canned fallback (empty queue) is not a
+ * queue delivery; stamping it orphaned a fresh marker for 10 minutes and
+ * starved enqueues with nothing in flight. Returns {head} when this wake
+ * owns a queue delivery (marker already written), {head:null} for the
+ * canned path (no marker; concurrent canned sends are idempotent resumes
+ * of the same turn, and the next queue delivery re-claims cleanly).
  */
 export async function drainIfUnowned(sessionId) {
   return withQueueLock(sessionId, async () => {
@@ -293,12 +338,12 @@ export async function drainIfUnowned(sessionId) {
     if (marker.fresh) return { skipped: true, why: "delivery in flight" };
     await restoreDraining(sessionId);
     const head = await drainHead(sessionId);
-    // Own the delivery (or the canned fallback) immediately: the marker is
-    // what sibling wakes check, and drain-settle begin re-stamps it with the
-    // same fingerprint at send time.
-    const fp = head ? promptFingerprint(head.prompt) : promptFingerprint("");
-    const markerPath = join(queueDir(), `${sessionKey(sessionId)}.settling`);
-    await atomicWrite(markerPath, `${Date.now()} ${fp}`);
-    return { head, fingerprint: fp };
+    if (head) {
+      const fp = promptFingerprint(head.prompt);
+      const markerPath = join(queueDir(), `${sessionKey(sessionId)}.settling`);
+      await atomicWrite(markerPath, `${Date.now()} ${fp}`);
+      return { head, fingerprint: fp };
+    }
+    return { head: null };
   });
 }

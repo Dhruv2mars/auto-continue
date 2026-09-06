@@ -74,13 +74,13 @@ describe("round-2: wake with pending .draining restores FIFO", () => {
     await settleCli(sid);
 
     // Genuinely empty queue: empty output is the canned fallback signal.
+    // The canned path is NOT a queue delivery — no ownership marker (a
+    // marker here would orphan fresh for 10 min and starve enqueues).
     const d3 = drainCli(sid);
     expect(d3.status).toBe(0);
     expect(d3.stdout.toString()).toBe("");
     expect((await listQueue(sid)).length).toBe(0);
     expect(await readDraining(sid)).toBeNull();
-    expect(existsSync(markerPath(sid))).toBe(true); // canned send owned
-    await settleCli(sid);
     expect(existsSync(markerPath(sid))).toBe(false);
   });
 });

@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { classify } from "./lib/classify.mjs";
 import { decide, blockDecision, HARNESS_CAPS, DEFAULTS } from "./lib/policy.mjs";
 import { loadState, saveState, appendLog, sessionKey } from "./lib/state.mjs";
-import { enqueue, listQueue, clearQueue, restoreDraining, readDraining } from "./lib/queue.mjs";
+import { enqueue, listQueue, clearQueue, restoreDraining, readDraining, markRestored, promptFingerprint } from "./lib/queue.mjs";
 import { homeDir } from "./lib/state.mjs";
 import { detectHarness } from "./lib/harness.mjs";
 
@@ -128,6 +128,11 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
   resumeCmdTpl = resumeCmdTpl.replaceAll("{session_id}", '"$1"').replaceAll("{prompt}", '"$2"');
   const prompt = process.env.AUTO_CONTINUE_PROMPT || CANNED_PROMPT;
   const delay = Number.isFinite(delaySec) ? Math.max(0, delaySec) : DEFAULTS.minDelaySec;
+  // Give-up ownership token: "<armedAt>:<continuesBefore>". The settle
+  // helper refunds only the bump THIS arm made and clears watcherArmedAt
+  // only if no newer arm replaced it — a blind max(0, n-1) stole a newer
+  // arm's bookkeeping.
+  const armToken = `${opts.armedAt}:${opts.continuesBefore ?? 0}`;
   const logFile = `${opts.home}/resumes/${new Date().toISOString().replace(/[:.]/g, "-")}-${sessionKey(sessionId)}.log`;
   // On wake, drain the queue head into $AC_PROMPT_FILE (never via shell
   // expansion, so quotes/newlines in the prompt cannot inject). The default
@@ -149,9 +154,9 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
   const backoff = probeBackoffSec();
   const sh = `mkdir -p ${sq(`${opts.home}/resumes`)} && sleep ${delay} && cd ${sq(opts.cwd)} && ` +
     (probeEnabled
-      ? `backoff=${sq(backoff.join(" "))}; attempt=0; while [ "$attempt" -lt ${backoff.length} ]; do if ${sq(process.execPath)} ${sq(PROBE_MJS)} ${sq(harness)} >> "$3" 2>&1; then break; fi; wait_s=$(echo $backoff | cut -d' ' -f$((attempt + 1))); echo "probe: still limited; re-arming in ${"$"}{wait_s}s (attempt $((attempt + 1))/${backoff.length})" >> "$3"; sleep "$wait_s"; attempt=$((attempt + 1)); done; if [ "$attempt" -ge ${backoff.length} ]; then echo "probe: giving up (quota still limited); queue left intact" >> "$3"; ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" giveup < /dev/null; exit 0; fi; `
+      ? `backoff=${sq(backoff.join(" "))}; attempt=0; while [ "$attempt" -lt ${backoff.length} ]; do if ${sq(process.execPath)} ${sq(PROBE_MJS)} ${sq(harness)} >> "$3" 2>&1; then break; fi; wait_s=$(echo $backoff | cut -d' ' -f$((attempt + 1))); echo "probe: still limited; re-arming in ${"$"}{wait_s}s (attempt $((attempt + 1))/${backoff.length})" >> "$3"; sleep "$wait_s"; attempt=$((attempt + 1)); done; if [ "$attempt" -ge ${backoff.length} ]; then echo "probe: giving up (quota still limited); queue left intact" >> "$3"; ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" giveup ${sq(armToken)} < /dev/null; exit 0; fi; `
       : ``) +
-    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; drain_rc=$?; if [ "$drain_rc" -eq 3 ]; then echo "drain: another watcher owns the delivery; standing down" >> "$3"; elif [ -s "$AC_PROMPT_FILE" ]; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" begin "$(cat "$AC_PROMPT_FILE")" < /dev/null; if ( ${resumeCmdTpl} ) < "$AC_PROMPT_FILE"; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" < /dev/null; else ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" fail < /dev/null; fi; else printf '%s' "$2" | ( ${resumeCmdTpl} ); fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
+    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; drain_rc=$?; if [ "$drain_rc" -eq 3 ]; then echo "drain: another watcher owns the delivery; standing down" >> "$3"; elif [ -s "$AC_PROMPT_FILE" ]; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" begin-file "$AC_PROMPT_FILE" < /dev/null; if ( ${resumeCmdTpl} ) < "$AC_PROMPT_FILE"; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" < /dev/null; else ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" fail < /dev/null; fi; else printf '%s' "$2" | ( ${resumeCmdTpl} ); fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
   const child = spawn("/bin/sh", ["-c", sh, "auto-continue", sessionId, prompt, logFile], { detached: true, stdio: "ignore" });
   child.unref();
   return true;
@@ -343,8 +348,9 @@ async function runQueueCmd(cmd, args) {
     return { cmd, armed: false };
   }
   const delay = enqueueDelaySec(args);
-  spawnWatcher(harness, sessionId, delay, { home, cwd: process.cwd(), resumeCmd: process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`] });
-  await saveState(sessionId, { ...state, watcherArmedAt: Date.now() });
+  const newArmedAt = Date.now();
+  spawnWatcher(harness, sessionId, delay, { home, cwd: process.cwd(), resumeCmd: process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`], armedAt: newArmedAt, continuesBefore: state.continues ?? 0 });
+  await saveState(sessionId, { ...state, watcherArmedAt: newArmedAt });
   await bumpGlobalResumeCount(home);
   await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "watcher_armed", delaySec: delay });
   queueOut({ armed: true, session: sessionId, queued: refreshed.length, delaySec: delay, reason: `watcher armed, resume in ${delay}s` });
@@ -396,7 +402,13 @@ export async function main(argv = process.argv.slice(2)) {
     // the restore is the crash recovery, and drain.mjs re-drains FIFO.
     const deliveryInFlight = await settlingInProgress(sessionId);
     if (!deliveryInFlight) {
-      try { await restoreDraining(sessionId); } catch {}
+      try {
+        const restored = await restoreDraining(sessionId);
+        // The marker read stale but the delivery may still be alive and
+        // about to succeed — leave a receipt so settle drops the head
+        // (identity-based, not liveness-based) instead of re-delivering it.
+        if (restored) await markRestored(sessionId, promptFingerprint(restored.prompt));
+      } catch {}
     }
     const canResume = !args.dry && process.env.AUTO_CONTINUE_RESUME !== "0";
     const resumeCmd = process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`];
@@ -408,7 +420,7 @@ export async function main(argv = process.argv.slice(2)) {
     const globalCount = await globalResumeCountToday(home);
     const overCeiling = globalCount >= DAILY_RESUME_CEILING;
     const spawned = canResume && hasTemplate && !deliveryInFlight && !recentlyArmed && !overCeiling
-      ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd })
+      ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd, armedAt: Date.now(), continuesBefore: state.continues ?? 0 })
       : false;
     await saveState(sessionId, { ...state, continues: decision.continueIndex, watcherArmedAt: spawned ? Date.now() : state.watcherArmedAt });
     if (spawned) await bumpGlobalResumeCount(home);
@@ -450,7 +462,10 @@ export async function main(argv = process.argv.slice(2)) {
   if (decision.action === "ignore" && event === "stop" && state.continues !== 0) {
     await saveState(sessionId, { ...state, continues: 0 });
     if (!await settlingInProgress(sessionId)) {
-      try { await restoreDraining(sessionId); } catch {}
+      try {
+        const restored = await restoreDraining(sessionId);
+        if (restored) await markRestored(sessionId, promptFingerprint(restored.prompt));
+      } catch {}
     }
   }
   return decision;

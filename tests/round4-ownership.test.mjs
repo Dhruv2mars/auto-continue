@@ -104,18 +104,20 @@ describe("round-4: drain ownership", () => {
 
   test("stale-marker restore + successful delivery converges: settle drops the matched head", async () => {
     const sid = "own2";
-    const { drainHead, restoreDraining } = await import("../core/lib/queue.mjs");
+    const { drainHead, restoreDraining, markRestored, promptFingerprint } = await import("../core/lib/queue.mjs");
     await enqueue(sid, "DUP-MARKER-xyz");
     // Watcher drains and begins (fresh marker).
     const head = await drainHead(sid);
     expect(head.prompt).toBe("DUP-MARKER-xyz");
-    settleCli(sid, "begin", "DUP-MARKER-xyz");
-    // Hook sees a stale marker and restores the head (fix-3 behavior);
-    // the resume then SUCCEEDS and settle acks.
+    settleCli(sid, "begin", promptFingerprint("DUP-MARKER-xyz"));
+    // Hook sees a stale marker and restores the head, leaving its receipt
+    // (what cli.mjs does on both restore sites); the resume then SUCCEEDS
+    // and settle acks.
     await restoreDraining(sid);
+    await markRestored(sid, promptFingerprint("DUP-MARKER-xyz"));
     expect((await listQueue(sid)).length).toBe(1);
-    // Settle success with the marker fingerprint: drops .draining AND the
-    // fingerprint-matched queue head — no re-delivery on the next wake.
+    // Settle success with the receipt matching the marker fingerprint:
+    // drops .draining AND the restored queue head — no re-delivery.
     settleCli(sid);
     expect(await readDraining(sid)).toBeNull();
     expect((await listQueue(sid)).length).toBe(0);
@@ -125,15 +127,17 @@ describe("round-4: drain ownership", () => {
     expect(d.stdout.toString()).toBe("");
   });
 
-  test("settle does NOT drop an unrelated head (fingerprint mismatch keeps queue)", async () => {
+  test("settle does NOT drop an unrelated head (receipt mismatch keeps queue)", async () => {
     const sid = "own3";
-    const { drainHead } = await import("../core/lib/queue.mjs");
+    const { drainHead, markRestored, promptFingerprint } = await import("../core/lib/queue.mjs");
     await enqueue(sid, "in-flight-prompt");
     const head = await drainHead(sid);
     settleCli(sid, "begin", head.prompt);
-    // User enqueues a DIFFERENT prompt mid-flight; stale restore + success
-    // settle must keep the new prompt (only the exact fingerprint drops).
+    // User enqueues a DIFFERENT prompt mid-flight; the hook's stale restore
+    // leaves a receipt for THAT new prompt, but settle only drops a head
+    // matching the DELIVERED fingerprint — the new prompt survives.
     await enqueue(sid, "user-second-prompt");
+    await markRestored(sid, promptFingerprint("user-second-prompt"));
     settleCli(sid);
     const q = await listQueue(sid);
     expect(q.length).toBe(1);
