@@ -18,6 +18,7 @@ import { decide, blockDecision, HARNESS_CAPS, DEFAULTS } from "./lib/policy.mjs"
 import { loadState, saveState, appendLog, sessionKey } from "./lib/state.mjs";
 import { enqueue, listQueue, clearQueue, restoreDraining, ackDraining, readDraining } from "./lib/queue.mjs";
 import { homeDir } from "./lib/state.mjs";
+import { detectHarness } from "./lib/harness.mjs";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const DRAIN_MJS = join(HERE, "drain.mjs");
@@ -123,7 +124,7 @@ function sq(s) {
 }
 
 function spawnWatcher(harness, sessionId, delaySec, opts) {
-  let resumeCmdTpl = opts.resumeCmd || DEFAULT_RESUME_CMD;
+  let resumeCmdTpl = opts.resumeCmd || (harness === "claude" ? DEFAULT_RESUME_CMD : undefined);
   resumeCmdTpl = resumeCmdTpl.replaceAll("{session_id}", '"$1"').replaceAll("{prompt}", '"$2"');
   const prompt = process.env.AUTO_CONTINUE_PROMPT || CANNED_PROMPT;
   const delay = Number.isFinite(delaySec) ? Math.max(0, delaySec) : DEFAULTS.minDelaySec;
@@ -217,7 +218,7 @@ async function logQuiet(entry) {
 
 async function runQueueCmd(cmd, args) {
   const home = process.env.AUTO_CONTINUE_HOME || `${process.env.HOME || "/tmp"}/.auto-continue`;
-  const harness = normalizeHarness(args.harness ?? process.env.AUTO_CONTINUE_HARNESS ?? "claude");
+  const harness = normalizeHarness(args.harness ?? process.env.AUTO_CONTINUE_HARNESS ?? detectHarness());
   const sessionId = args._[1] ?? "default";
 
   if (cmd === "list") {
@@ -320,6 +321,16 @@ async function runQueueCmd(cmd, args) {
     queueOut({ armed: false, session: sessionId, queued: refreshed.length, reason });
     return { cmd, armed: false };
   }
+  const resumeCmd = process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`];
+  // The claude template is claude-only: another harness with no explicit
+  // resume cmd must refuse honestly instead of silently running the real
+  // claude binary against its session ids.
+  if (harness !== "claude" && !resumeCmd) {
+    const reason = `no AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()} configured; set it to enable detached resume (prompt stays queued)`;
+    await logQuiet({ harness, event: "enqueue", session: sessionId, kind: "queue", source: "cli", action: "queued", detail: reason });
+    queueOut({ armed: false, session: sessionId, queued: refreshed.length, reason });
+    return { cmd, armed: false };
+  }
   const delay = enqueueDelaySec(args);
   spawnWatcher(harness, sessionId, delay, { home, cwd: process.cwd(), resumeCmd: process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`] });
   await saveState(sessionId, { ...state, watcherArmedAt: Date.now() });
@@ -369,22 +380,36 @@ export async function main(argv = process.argv.slice(2)) {
   if (decision.action === "resume_later") {
     try { await restoreDraining(sessionId); } catch {}
     const canResume = !args.dry && process.env.AUTO_CONTINUE_RESUME !== "0";
+    const resumeCmd = process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`];
+    // The claude template is claude-only: another harness with no explicit
+    // resume cmd must refuse honestly instead of silently running the real
+    // claude binary against its session ids.
+    const hasTemplate = Boolean(resumeCmd) || harness === "claude";
     const recentlyArmed = state.watcherArmedAt && Date.now() - state.watcherArmedAt < DEDUPE_WINDOW_MS;
     const globalCount = await globalResumeCountToday(home);
     const overCeiling = globalCount >= DAILY_RESUME_CEILING;
-    const spawned = canResume && !recentlyArmed && !overCeiling
-      ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd: process.env[`AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()}`] })
+    const spawned = canResume && hasTemplate && !recentlyArmed && !overCeiling
+      ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd })
       : false;
     await saveState(sessionId, { ...state, continues: decision.continueIndex, watcherArmedAt: spawned ? Date.now() : state.watcherArmedAt });
     if (spawned) await bumpGlobalResumeCount(home);
     if (!spawned) {
-      const why = recentlyArmed ? "watcher already armed" : overCeiling ? `daily resume ceiling (${DAILY_RESUME_CEILING}) reached` : "auto-resume disabled or unsupported harness";
+      const why = recentlyArmed
+        ? "watcher already armed"
+        : overCeiling
+          ? `daily resume ceiling (${DAILY_RESUME_CEILING}) reached`
+          : !hasTemplate
+            ? `no AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()} configured; set it to enable detached resume`
+            : "auto-resume disabled or unsupported harness";
       process.stderr.write(`[auto-continue] ${decision.reason} (${why})\n`);
     }
     return { ...decision, spawned };
   }
 
-  if (decision.action === "notify_only") {
+  if (decision.action === "notify_only" || decision.action === "give_up") {
+    // Terminal decisions must be observer-visible: give_up is the one
+    // decision that previously fell through silently (empty stdout+stderr
+    // reads as success, so the harness kept looping into its own kill switch).
     process.stderr.write(`[auto-continue] ${decision.reason}\n`);
   }
 
