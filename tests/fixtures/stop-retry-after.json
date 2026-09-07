@@ -1,6 +1,0 @@
-{
-  "session_id": "test-session-retry",
-  "hook_event_name": "Stop",
-  "stop_hook_active": false,
-  "last_assistant_message": "rate limit exceeded. Please try again in 1 seconds."
-}
