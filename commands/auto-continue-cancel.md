@@ -1,5 +1,5 @@
 ---
-description: Cancel a queued prompt
+description: Cancel a waiting prompt
 argument-hint: <id|all>
 allowed-tools: Bash(node:*)
 ---

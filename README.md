@@ -1,12 +1,12 @@
 # auto-continue
 
-You hit a 5-hour limit. You know when it resets — the harness just told you. Queue the prompt you want sent then, and walk away.
+Hand it the prompt you want run next, and walk away.
 
 ```
-/queue 3pm finish the migration and run the tests
+/auto-continue continue the work
 ```
 
-At 3pm (plus a minute of slop) that prompt is sent to the session you queued it from. That's the whole tool.
+If you're not rate limited, it goes now. If you are, the send fails, `ac` reads the reset time out of that failure, sleeps until then, and sends it. Same command either way — you never have to know which case you're in.
 
 ## Install
 
@@ -26,14 +26,14 @@ For the slash commands in Claude Code:
 
 | | |
 |---|---|
-| `/queue 3pm <prompt>` | send at the next 3pm |
-| `/queue +5h <prompt>` | send in 5 hours |
-| `/queued` | what's waiting |
-| `/unqueue <id\|all>` | cancel |
+| `/auto-continue <prompt>` | send now; reschedule itself if you're limited |
+| `/auto-continue at 3pm <prompt>` | skip the first attempt, send at 3pm |
+| `/auto-continue-status` | what's waiting, and what happened |
+| `/auto-continue-cancel <id\|all>` | cancel |
 
-Times: `3pm`, `3:30pm`, `15:30`, `+5h`, `90m`. Anything else is rejected on the spot, while you're still at the keyboard to retype it.
+Explicit times: `3pm`, `3:30pm`, `15:30`, `+5h`, `90m`. You rarely need one — the failure tells `ac` when the window reopens.
 
-Same from any shell: `ac add 3pm ...`, `ac list`, `ac cancel <id>`.
+Same from any shell: `ac add continue the work`, `ac list`, `ac cancel <id>`.
 
 ## Other harnesses
 
@@ -48,9 +48,11 @@ Without one set, `ac` refuses and says which variable to set. It will not guess 
 
 ## How it works
 
-`ac add` forks one detached `sleep N; send` per queued prompt. That's the entire mechanism — no daemon, no scheduler, no background service to install or debug.
+`ac add` forks one detached process per prompt. It attempts the send; if that fails, it asks the failure when to try again, sleeps, and retries — up to four attempts. That's the entire mechanism: no daemon, no scheduler, no hooks, no background service to install or debug.
 
-Three consequences worth knowing:
+The reset time is read from the output of the send that just failed — `Claude AI usage limit reached|<epoch>`, `retry-after`, an ISO timestamp, or `resets 3pm`. A failure that isn't a limit at all (bad credentials, unknown session) is **not** retried; it's marked `failed` and the reason is in the log.
+
+Three more consequences worth knowing:
 
 - **The queue file is a view.** Each sleeper carries its own prompt in its own file and needs nothing else to send. `queue.json` exists for `list` and `cancel`. Nothing gates on it, so it cannot wedge a delivery.
 - **Reboots are recovered lazily.** Any `ac` command re-forks a sleeper that died, firing anything already overdue. If your laptop was asleep the prompt goes out when you wake it — which is right, since nothing could have run while it was off.
@@ -63,8 +65,9 @@ The send retries twice, five minutes apart, in case the window opens slightly la
 | Variable | Default | |
 |---|---|---|
 | `AC_SEND_<HARNESS>` | claude only | how to send a prompt; `$1` session, `$2` prompt file |
-| `AC_PAD_SEC` | 60 | grace added to the time you typed |
-| `AC_RETRY_SEC` | 300 | gap between send attempts |
+| `AC_PAD_SEC` | 60 | grace added to a time you typed |
+| `AC_RETRIES` | 4 | attempts before giving up |
+| `AC_BLIND_SEC` | 1800 | wait when the failure is limit-shaped but names no time |
 | `AC_SESSION` | auto | session id to resume |
 | `AUTO_CONTINUE_HOME` | `~/.auto-continue` | state, prompts, and send logs (mode 0700) |
 
@@ -73,6 +76,8 @@ Send output lands in `~/.auto-continue/logs/<id>.log`. The default Claude comman
 ## Scope
 
 Built for 5-hour windows. A prompt queued days out will fire late if the machine reboots and you don't touch `ac` — good enough for same-day resets, not a job scheduler.
+
+Verified against the real CLI: `claude --resume <id> -p` continues an existing session with its context intact. Verified against a fake harness: immediate send, rate-limited reschedule from a parsed reset time, non-limit failures not retried, cancel, dead-sleeper recovery, and two prompts in one session not colliding.
 
 ## Development
 

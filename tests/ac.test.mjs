@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -11,7 +11,7 @@ const run = (args, env = {}) =>
   execFileSync(process.execPath, [AC, ...args], {
     encoding: "utf8",
     env: {
-      ...process.env, AUTO_CONTINUE_HOME: home, AC_PAD_SEC: "0", AC_RETRY_SEC: "1",
+      ...process.env, AUTO_CONTINUE_HOME: home, AC_PAD_SEC: "0", AC_BLIND_SEC: "1", AC_RETRIES: "3",
       AC_HARNESS: "claude", AC_SESSION: "S1",
       AC_SEND_CLAUDE: `printf '%s\\n' "$(cat "$2")" >> ${sent}`,
       ...env,
@@ -54,20 +54,20 @@ test("parseWhen: garbage throws instead of guessing", async () => {
 
 test("a queued prompt is delivered verbatim at its time", async () => {
   const prompt = 'fix $PATH and `whoami` and "quotes"';
-  run(["add", "+1s", prompt]);
+  run(["add", "at", "+1s", prompt]);
   await sleep(2500);
   expect(readFileSync(sent, "utf8").trim()).toBe(prompt);
 });
 
 test("list reports pending then sent", async () => {
-  run(["add", "+1s", "work"]);
+  run(["add", "at", "+1s", "work"]);
   expect(run(["list"])).toContain("pending");
   await sleep(2500);
   expect(run(["list"])).toContain("sent");
 });
 
 test("cancel kills the sleeper and nothing is sent", async () => {
-  run(["add", "+2s", "work"]);
+  run(["add", "at", "+2s", "work"]);
   run(["cancel", "all"]);
   await sleep(3500);
   expect(existsSync(sent)).toBe(false);
@@ -75,7 +75,7 @@ test("cancel kills the sleeper and nothing is sent", async () => {
 });
 
 test("a dead sleeper is re-forked on the next invocation", async () => {
-  run(["add", "+30s", "work"]);
+  run(["add", "at", "+30s", "work"]);
   const before = JSON.parse(readFileSync(join(home, "queue.json"), "utf8"))[0];
   process.kill(before.pid);
   await sleep(300);
@@ -86,8 +86,8 @@ test("a dead sleeper is re-forked on the next invocation", async () => {
 
 test("two prompts for one session do not overlap", { timeout: 20000 }, async () => {
   const script = `echo "START $(cat "$2")" >> ${sent}; sleep 2; echo "END $(cat "$2")" >> ${sent}`;
-  run(["add", "+1s", "one"], { AC_SEND_CLAUDE: script });
-  run(["add", "+1s", "two"], { AC_SEND_CLAUDE: script });
+  run(["add", "at", "+1s", "one"], { AC_SEND_CLAUDE: script });
+  run(["add", "at", "+1s", "two"], { AC_SEND_CLAUDE: script });
   await sleep(12000);
   expect(readFileSync(sent, "utf8").trim().split("\n")).toEqual([
     "START one", "END one", "START two", "END two",
@@ -95,7 +95,48 @@ test("two prompts for one session do not overlap", { timeout: 20000 }, async () 
 });
 
 test("an unconfigured harness refuses instead of running claude", () => {
-  expect(() => run(["add", "+1s", "work"], { AC_HARNESS: "codex", AC_SEND_CODEX: "" }))
+  expect(() => run(["add", "at", "+1s", "work"], { AC_HARNESS: "codex", AC_SEND_CODEX: "" }))
     .toThrow(/AC_SEND_CODEX|Command failed/);
   expect(existsSync(sent)).toBe(false);
+});
+
+// --- the two cases: limited, and not limited ---
+
+test("not limited: the prompt is sent immediately", async () => {
+  run(["add", "continue the work"], { AC_SEND_CLAUDE: `echo ok; exit 0` });
+  await sleep(1500);
+  expect(run(["list"])).toContain("sent");
+});
+
+test("limited: it reads the reset time from the failure and retries then", async () => {
+  const flag = join(home, "unlocked");
+  const reset = Math.floor(Date.now() / 1000) + 3;
+  run(["add", "continue the work"], {
+    AC_SEND_CLAUDE: `if [ -f ${flag} ]; then echo DELIVERED >> ${sent}; exit 0; else echo 'Claude AI usage limit reached|${reset}'; exit 1; fi`,
+    AC_BLIND_SEC: "1",
+  });
+  await sleep(800);
+  expect(run(["list"])).toContain("pending");   // held, not lost
+  execFileSync("touch", [flag]);
+  await sleep(70000);                            // clamped floor is 60s
+  expect(readFileSync(sent, "utf8")).toContain("DELIVERED");
+}, 90000);
+
+test("a non-limit failure is not retried and is reported as failed", async () => {
+  run(["add", "work"], { AC_SEND_CLAUDE: `echo "Invalid API key"; exit 1` });
+  await sleep(1500);
+  expect(run(["list"])).toContain("failed");
+  expect(readFileSync(join(home, "logs", readdirSync(join(home, "logs"))[0]), "utf8"))
+    .toContain("non-limit reason");
+});
+
+test("parseResetSec: reads real limit formats, refuses non-limit failures", async () => {
+  const { parseResetSec } = await import("../bin/ac.mjs");
+  const now = new Date("2026-09-07T12:00:00").getTime();
+  expect(parseResetSec("Claude AI usage limit reached|" + (now / 1000 + 7200), now)).toBe(7200);
+  expect(parseResetSec("5-hour limit reached \u2219 resets 3pm", now)).toBe(10800);
+  expect(parseResetSec("429 rate limit; retry-after: 1800", now)).toBe(1800);
+  expect(parseResetSec("usage limit reached", now)).toBeGreaterThan(0);  // blind wait
+  expect(parseResetSec("Invalid API key", now)).toBeNull();
+  expect(parseResetSec("Error: session not found", now)).toBeNull();
 });

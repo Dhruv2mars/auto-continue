@@ -1,5 +1,5 @@
 ---
-description: Show prompts queued for when the rate-limit window reopens
+description: Show prompts waiting on a rate-limit window
 allowed-tools: Bash(node:*)
 ---
 
