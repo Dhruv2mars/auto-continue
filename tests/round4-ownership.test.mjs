@@ -30,11 +30,20 @@ function drainCli(sessionId) {
 }
 
 function settleCli(sessionId, mode = "", fp = "") {
-  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, fp], {
+  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, fp].filter((x) => x !== ""), {
     env: { ...process.env, AUTO_CONTINUE_HOME: home },
     cwd: import.meta.dir,
     encoding: "utf8",
   });
+}
+
+// Arm state like cli.mjs does; returns the ownership token the watcher chain
+// would pass to settle success/fail.
+async function armForSettle(sid, continues = 0) {
+  const { saveState } = await import("../core/lib/state.mjs");
+  const armedAt = Date.now();
+  await saveState(sid, { continues, watcherArmedAt: armedAt, updatedAt: 0 });
+  return `${armedAt}:${continues}`;
 }
 
 beforeEach(() => {
@@ -109,6 +118,9 @@ describe("round-4: drain ownership", () => {
     // Watcher drains and begins (fresh marker).
     const head = await drainHead(sid);
     expect(head.prompt).toBe("DUP-MARKER-xyz");
+    // Arm BEFORE the marker stamp (the real chain's order — the ownership
+    // check requires armedAt <= stampTs).
+    const tok = await armForSettle(sid);
     settleCli(sid, "begin", promptFingerprint("DUP-MARKER-xyz"));
     // Hook sees a stale marker and restores the head, leaving its receipt
     // (what cli.mjs does on both restore sites); the resume then SUCCEEDS
@@ -116,9 +128,10 @@ describe("round-4: drain ownership", () => {
     await restoreDraining(sid);
     await markRestored(sid, promptFingerprint("DUP-MARKER-xyz"));
     expect((await listQueue(sid)).length).toBe(1);
-    // Settle success with the receipt matching the marker fingerprint:
-    // drops .draining AND the restored queue head — no re-delivery.
-    settleCli(sid);
+    // Settle success (owning the arm) with the receipt matching the marker
+    // fingerprint: drops .draining AND the restored queue head — no
+    // re-delivery.
+    settleCli(sid, "success", tok);
     expect(await readDraining(sid)).toBeNull();
     expect((await listQueue(sid)).length).toBe(0);
     // A later wake finds nothing to send (empty output, no restore loop).
@@ -132,13 +145,14 @@ describe("round-4: drain ownership", () => {
     const { drainHead, markRestored, promptFingerprint } = await import("../core/lib/queue.mjs");
     await enqueue(sid, "in-flight-prompt");
     const head = await drainHead(sid);
+    const tok3 = await armForSettle(sid);
     settleCli(sid, "begin", head.prompt);
     // User enqueues a DIFFERENT prompt mid-flight; the hook's stale restore
     // leaves a receipt for THAT new prompt, but settle only drops a head
     // matching the DELIVERED fingerprint — the new prompt survives.
     await enqueue(sid, "user-second-prompt");
     await markRestored(sid, promptFingerprint("user-second-prompt"));
-    settleCli(sid);
+    settleCli(sid, "success", tok3);
     const q = await listQueue(sid);
     expect(q.length).toBe(1);
     expect(q[0].prompt).toBe("user-second-prompt");

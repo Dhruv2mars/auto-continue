@@ -156,7 +156,7 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
     (probeEnabled
       ? `backoff=${sq(backoff.join(" "))}; attempt=0; while [ "$attempt" -lt ${backoff.length} ]; do if ${sq(process.execPath)} ${sq(PROBE_MJS)} ${sq(harness)} >> "$3" 2>&1; then break; fi; wait_s=$(echo $backoff | cut -d' ' -f$((attempt + 1))); echo "probe: still limited; re-arming in ${"$"}{wait_s}s (attempt $((attempt + 1))/${backoff.length})" >> "$3"; sleep "$wait_s"; attempt=$((attempt + 1)); done; if [ "$attempt" -ge ${backoff.length} ]; then echo "probe: giving up (quota still limited); queue left intact" >> "$3"; ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" giveup ${sq(armToken)} < /dev/null; exit 0; fi; `
       : ``) +
-    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; drain_rc=$?; if [ "$drain_rc" -eq 3 ]; then echo "drain: another watcher owns the delivery; standing down" >> "$3"; elif [ -s "$AC_PROMPT_FILE" ]; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" begin-file "$AC_PROMPT_FILE" < /dev/null; if ( ${resumeCmdTpl} ) < "$AC_PROMPT_FILE"; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" < /dev/null; else ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" fail < /dev/null; fi; else printf '%s' "$2" | ( ${resumeCmdTpl} ); fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
+    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; drain_rc=$?; if [ "$drain_rc" -eq 3 ]; then echo "drain: another watcher owns the delivery; standing down" >> "$3"; elif [ -s "$AC_PROMPT_FILE" ]; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" begin-file "$AC_PROMPT_FILE" < /dev/null; if ( ${resumeCmdTpl} ) < "$AC_PROMPT_FILE"; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" success ${sq(armToken)} < /dev/null; else ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" fail ${sq(armToken)} < /dev/null; fi; else printf '%s' "$2" | ( ${resumeCmdTpl} ); fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
   const child = spawn("/bin/sh", ["-c", sh, "auto-continue", sessionId, prompt, logFile], { detached: true, stdio: "ignore" });
   child.unref();
   return true;
@@ -232,7 +232,15 @@ async function runQueueCmd(cmd, args) {
   }
 
   if (cmd === "clear") {
-    const cleared = await clearQueue(sessionId);
+    let cleared;
+    try {
+      cleared = await clearQueue(sessionId);
+    } catch (err) {
+      // Lock contention: silent exit 0 read as success while nothing was
+      // cleared — report the refusal honestly instead.
+      queueOut({ session: sessionId, cleared: 0, reason: String(err?.message || err) });
+      return { cmd, session: sessionId, cleared: 0 };
+    }
     await logQuiet({ harness, event: "queue_clear", session: sessionId, kind: "queue", source: "cli", action: "cleared", detail: String(cleared) });
     queueOut({ session: sessionId, cleared });
     return { cmd, session: sessionId, cleared };
@@ -416,13 +424,19 @@ export async function main(argv = process.argv.slice(2)) {
     // resume cmd must refuse honestly instead of silently running the real
     // claude binary against its session ids.
     const hasTemplate = Boolean(resumeCmd) || harness === "claude";
-    const recentlyArmed = state.watcherArmedAt && Date.now() - state.watcherArmedAt < DEDUPE_WINDOW_MS;
+    const now = Date.now();
+    const recentlyArmed = state.watcherArmedAt && now - state.watcherArmedAt < DEDUPE_WINDOW_MS;
     const globalCount = await globalResumeCountToday(home);
     const overCeiling = globalCount >= DAILY_RESUME_CEILING;
+    // ONE timestamp shared with the watcher: the arm token (giveup/settle
+    // ownership) is compared against the PERSISTED watcherArmedAt, so two
+    // Date.now() calls (1ms apart) made every token mismatch — a giveup
+    // released nothing and a late settle could not prove ownership.
+    const armedAt = now;
     const spawned = canResume && hasTemplate && !deliveryInFlight && !recentlyArmed && !overCeiling
-      ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd, armedAt: Date.now(), continuesBefore: state.continues ?? 0 })
+      ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd, armedAt, continuesBefore: state.continues ?? 0 })
       : false;
-    await saveState(sessionId, { ...state, continues: decision.continueIndex, watcherArmedAt: spawned ? Date.now() : state.watcherArmedAt });
+    await saveState(sessionId, { ...state, continues: decision.continueIndex, watcherArmedAt: spawned ? armedAt : state.watcherArmedAt });
     if (spawned) await bumpGlobalResumeCount(home);
     if (!spawned) {
       const why = deliveryInFlight
@@ -434,7 +448,7 @@ export async function main(argv = process.argv.slice(2)) {
             : !hasTemplate
               ? `no AUTO_CONTINUE_RESUME_CMD_${harness.toUpperCase()} configured; set it to enable detached resume`
               : "auto-resume disabled or unsupported harness";
-      process.stderr.write(`[auto-continue] ${decision.reason} (${why})\n`);
+      process.stderr.write(`[auto-continue] ${decision.reason} (not resumed: ${why})\n`);
     }
     return { ...decision, spawned };
   }

@@ -74,9 +74,39 @@ try {
     // own giveup will handle them). No daily refund either — the newer arm
     // made that bump.
   } else {
+    // Ownership: success/fail settle ONLY the delivery that still owns the
+    // marker+arm (token = "<armedAt>:<continuesBefore>", same as giveup).
+    // When a takeover re-drained the head, it re-stamped the marker with a
+    // NEWER armedAt — the presumed-dead delivery's late settle would
+    // otherwise ack or restore the LIVE owner's head and erase its marker
+    // (duplicate or loss). A foreign settle exits without touching anything.
+    const armedAtTok = String(process.argv[4] ?? "").split(":")[0];
+    let owns = true;
+    try {
+      const stampTs = Number((await readFile(markerPath, "utf8")).trim().split(" ")[0]);
+      const st = await loadState(sessionId);
+      // Owns when the marker was stamped by THIS arm: its armedAt still in
+      // state AND the marker has not been re-stamped by a later takeover
+      // after this delivery's begin (stamp written at begin time >= armedAt,
+      // and no newer arm in state).
+      owns = Boolean(st.watcherArmedAt && String(st.watcherArmedAt) === armedAtTok)
+        && Number.isFinite(stampTs) && stampTs >= Number(armedAtTok);
+    } catch {
+      owns = false; // no marker / unreadable: nothing this settle may claim
+    }
+    if (!owns) process.exit(0);
     if (mode === "fail") {
       await restoreDraining(sessionId);
       await unlink(restoredPath).catch(() => {});
+      // The arm's delivery failed: no live watcher remains for this arm.
+      // Release it so the next real limit event re-arms instead of being
+      // suppressed for the dedupe window while burning continuation budget.
+      try {
+        const st = await loadState(sessionId);
+        if (String(st.watcherArmedAt) === armedAtTok) {
+          await saveState(sessionId, { ...st, watcherArmedAt: 0 });
+        }
+      } catch {}
     } else {
       // Which prompt did this watcher send? Fingerprint from the marker
       // BEFORE ack removes it — no freshness gate here: identity, not

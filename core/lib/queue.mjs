@@ -163,8 +163,16 @@ export async function drainHead(sessionId) {
  * Put a pending .draining item back at the head of the queue.
  * Deduplicates when the queue still holds the same entry (crash between
  * draining-write and queue-write). Returns the restored item or null.
+ * Serialized like every mutator: the hook calls this cross-process, and an
+ * unlocked restore's stale-list write erased concurrent locked enqueues
+ * (and collided on the shared tmp filename). Callers already inside
+ * withQueueLock use restoreDrainingUnlocked.
  */
 export async function restoreDraining(sessionId) {
+  return withQueueLock(sessionId, () => restoreDrainingUnlocked(sessionId));
+}
+
+export async function restoreDrainingUnlocked(sessionId) {
   const draining = await readDrainingRaw(sessionId);
   if (!draining) return null;
   const items = await list(sessionId);
@@ -336,7 +344,7 @@ export async function drainIfUnowned(sessionId) {
   return withQueueLock(sessionId, async () => {
     const marker = await markerInfo(sessionId);
     if (marker.fresh) return { skipped: true, why: "delivery in flight" };
-    await restoreDraining(sessionId);
+    await restoreDrainingUnlocked(sessionId);
     const head = await drainHead(sessionId);
     if (head) {
       const fp = promptFingerprint(head.prompt);

@@ -24,12 +24,20 @@ function drainCli(sessionId) {
   });
 }
 
-function settleCli(sessionId, mode = "") {
-  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode], {
+function settleCli(sessionId, mode = "", tok = "") {
+  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, tok].filter((x) => x !== ""), {
     env: { ...process.env, AUTO_CONTINUE_HOME: home },
     cwd: import.meta.dir,
     encoding: "utf8",
   });
+}
+
+// Arm state like cli.mjs does, then settle as the owning watcher would.
+async function armForSettle(sid, continues = 0) {
+  const { saveState } = await import("../core/lib/state.mjs");
+  const armedAt = Date.now();
+  await saveState(sid, { continues, watcherArmedAt: armedAt, updatedAt: 0 });
+  return `${armedAt}:${continues}`;
 }
 
 function markerPath(sid) {
@@ -57,8 +65,11 @@ describe("round-2: wake with pending .draining restores FIFO", () => {
     // Simulate watcher 1 crash mid-send: head moved to .draining, never acked.
     const head = await drainHead(sid);
     expect(head.prompt).toBe("interrupted-prompt-xyz");
-    // A second prompt is enqueued and a new watcher arms + wakes.
+    // A second prompt is enqueued and a new watcher arms + wakes. Arm state
+    // like cli.mjs does (the ownership token must predate the wake's marker
+    // stamp, as in the real chain).
     await enqueue(sid, "second-prompt");
+    const tok = await armForSettle(sid);
 
     // Wake 1: the interrupted head must come out first (not canned fallback).
     const d1 = drainCli(sid);
@@ -67,11 +78,12 @@ describe("round-2: wake with pending .draining restores FIFO", () => {
     expect(await readDraining(sid)).not.toBeNull();
 
     // The resume exits 0 -> settle acks (and clears the marker); wake 2
-    // delivers the second prompt.
-    await settleCli(sid);
+    // delivers the second prompt. Settles carry the arm token (real-chain
+    // ownership) via the persisted armedAt.
+    await settleCli(sid, "success", tok);
     const d2 = drainCli(sid);
     expect(d2.stdout.toString()).toBe("second-prompt");
-    await settleCli(sid);
+    await settleCli(sid, "success", tok);
 
     // Genuinely empty queue: empty output is the canned fallback signal.
     // The canned path is NOT a queue delivery — no ownership marker (a
