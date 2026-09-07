@@ -36,9 +36,10 @@ try {
   await mkdir(dir, { recursive: true });
   if (mode === "begin" || mode === "begin-file") {
     // Marker proves a delivery is in flight (hook reads its existence); the
-    // fingerprint identifies WHICH prompt is in flight. begin-file reads the
-    // drained prompt file itself so the fingerprint covers the EXACT stored
-    // bytes (a shell "$(cat)" argument would strip trailing newlines).
+    // fingerprint identifies WHICH prompt is in flight and the token WHICH
+    // arm stamped it. begin-file reads the drained prompt file itself so
+    // the fingerprint covers the EXACT stored bytes (a shell "$(cat)"
+    // argument would strip trailing newlines). argv[5] is the arm token.
     let fp;
     if (mode === "begin-file") {
       const { readFile: rf } = await import("node:fs/promises");
@@ -46,7 +47,8 @@ try {
     } else {
       fp = process.argv[4] || promptFingerprint("");
     }
-    await writeFile(`${markerPath}.tmp`, `${Date.now()} ${fp}`);
+    const armTok = String(process.argv[5] ?? "").split(":")[0] || "0";
+    await writeFile(`${markerPath}.tmp`, `${Date.now()} ${fp} ${armTok}`);
     // Race with a concurrent settle on the same head: fine, marker exists.
     await rename(`${markerPath}.tmp`, markerPath).catch(() => {});
   } else if (mode === "giveup") {
@@ -74,27 +76,29 @@ try {
     // own giveup will handle them). No daily refund either — the newer arm
     // made that bump.
   } else {
-    // Ownership: success/fail settle ONLY the delivery that still owns the
-    // marker+arm (token = "<armedAt>:<continuesBefore>", same as giveup).
-    // When a takeover re-drained the head, it re-stamped the marker with a
-    // NEWER armedAt — the presumed-dead delivery's late settle would
-    // otherwise ack or restore the LIVE owner's head and erase its marker
-    // (duplicate or loss). A foreign settle exits without touching anything.
+    // Ownership has TWO halves:
+    // - QUEUE side (.draining + marker): decided by MARKER IDENTITY — did
+    //   THIS arm stamp the marker now on disk? A takeover re-drain restamps
+    //   it with the newer arm's token, so a presumed-dead delivery's late
+    //   settle can no longer ack/restore the live owner's head. This half
+    //   must run even when state has moved on (a newer arm persisted while
+    //   this watcher still slept): refusing it orphaned a delivered head
+    //   under a fresh marker — 10-min queue freeze, then duplicate.
+    // - STATE side (watcherArmedAt): decided by the TOKEN matching the
+    //   persisted arm — a stale arm never releases or rewrites a newer
+    //   arm's state (that is giveup/fail's job only, and only their own).
     const armedAtTok = String(process.argv[4] ?? "").split(":")[0];
-    let owns = true;
+    let markerToken = null;
+    let fp = null;
     try {
-      const stampTs = Number((await readFile(markerPath, "utf8")).trim().split(" ")[0]);
-      const st = await loadState(sessionId);
-      // Owns when the marker was stamped by THIS arm: its armedAt still in
-      // state AND the marker has not been re-stamped by a later takeover
-      // after this delivery's begin (stamp written at begin time >= armedAt,
-      // and no newer arm in state).
-      owns = Boolean(st.watcherArmedAt && String(st.watcherArmedAt) === armedAtTok)
-        && Number.isFinite(stampTs) && stampTs >= Number(armedAtTok);
+      const parts = (await readFile(markerPath, "utf8")).trim().split(" ");
+      fp = parts[1] || null;
+      markerToken = parts[2] || null;
     } catch {
-      owns = false; // no marker / unreadable: nothing this settle may claim
+      process.exit(0); // no marker: this delivery was never begun; nothing to settle
     }
-    if (!owns) process.exit(0);
+    const ownsMarker = markerToken === armedAtTok;
+    if (!ownsMarker) process.exit(0);
     if (mode === "fail") {
       await restoreDraining(sessionId);
       await unlink(restoredPath).catch(() => {});
@@ -108,13 +112,8 @@ try {
         }
       } catch {}
     } else {
-      // Which prompt did this watcher send? Fingerprint from the marker
-      // BEFORE ack removes it — no freshness gate here: identity, not
+      // Fingerprint read BEFORE ack removes the marker — identity, not
       // liveness, decides the convergence drop.
-      let fp = null;
-      try {
-        fp = (await readFile(markerPath, "utf8")).trim().split(" ")[1] || null;
-      } catch {}
       await ackDraining(sessionId);
       await dropIfRestored(sessionId, fp);
       await unlink(restoredPath).catch(() => {});

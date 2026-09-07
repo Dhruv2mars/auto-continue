@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { classify } from "./lib/classify.mjs";
 import { decide, blockDecision, HARNESS_CAPS, DEFAULTS } from "./lib/policy.mjs";
 import { loadState, saveState, appendLog, sessionKey } from "./lib/state.mjs";
-import { enqueue, listQueue, clearQueue, restoreDraining, readDraining, markRestored, promptFingerprint } from "./lib/queue.mjs";
+import { enqueue, listQueue, clearQueue, restoreDraining, readDraining, markRestored, promptFingerprint, withQueueLock } from "./lib/queue.mjs";
 import { homeDir } from "./lib/state.mjs";
 import { detectHarness } from "./lib/harness.mjs";
 
@@ -156,7 +156,7 @@ function spawnWatcher(harness, sessionId, delaySec, opts) {
     (probeEnabled
       ? `backoff=${sq(backoff.join(" "))}; attempt=0; while [ "$attempt" -lt ${backoff.length} ]; do if ${sq(process.execPath)} ${sq(PROBE_MJS)} ${sq(harness)} >> "$3" 2>&1; then break; fi; wait_s=$(echo $backoff | cut -d' ' -f$((attempt + 1))); echo "probe: still limited; re-arming in ${"$"}{wait_s}s (attempt $((attempt + 1))/${backoff.length})" >> "$3"; sleep "$wait_s"; attempt=$((attempt + 1)); done; if [ "$attempt" -ge ${backoff.length} ]; then echo "probe: giving up (quota still limited); queue left intact" >> "$3"; ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" giveup ${sq(armToken)} < /dev/null; exit 0; fi; `
       : ``) +
-    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" > "$AC_PROMPT_FILE" < /dev/null; drain_rc=$?; if [ "$drain_rc" -eq 3 ]; then echo "drain: another watcher owns the delivery; standing down" >> "$3"; elif [ -s "$AC_PROMPT_FILE" ]; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" begin-file "$AC_PROMPT_FILE" < /dev/null; if ( ${resumeCmdTpl} ) < "$AC_PROMPT_FILE"; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" success ${sq(armToken)} < /dev/null; else ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" fail ${sq(armToken)} < /dev/null; fi; else printf '%s' "$2" | ( ${resumeCmdTpl} ); fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
+    `export AC_PROMPT_FILE="$(mktemp)" && ${sq(process.execPath)} ${sq(DRAIN_MJS)} "$1" ${sq(armToken)} > "$AC_PROMPT_FILE" < /dev/null; drain_rc=$?; if [ "$drain_rc" -eq 3 ]; then echo "drain: another watcher owns the delivery; standing down" >> "$3"; elif [ -s "$AC_PROMPT_FILE" ]; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" begin-file "$AC_PROMPT_FILE" ${sq(armToken)} < /dev/null; if ( ${resumeCmdTpl} ) < "$AC_PROMPT_FILE"; then ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" success ${sq(armToken)} < /dev/null; else ${sq(process.execPath)} ${sq(DRAIN_SETTLE_MJS)} "$1" fail ${sq(armToken)} < /dev/null; fi; else printf '%s' "$2" | ( ${resumeCmdTpl} ); fi >> "$3" 2>&1; rm -f "$AC_PROMPT_FILE"`;
   const child = spawn("/bin/sh", ["-c", sh, "auto-continue", sessionId, prompt, logFile], { detached: true, stdio: "ignore" });
   child.unref();
   return true;
@@ -436,8 +436,28 @@ export async function main(argv = process.argv.slice(2)) {
     const spawned = canResume && hasTemplate && !deliveryInFlight && !recentlyArmed && !overCeiling
       ? spawnWatcher(harness, sessionId, decision.delaySec, { home, cwd: process.cwd(), resumeCmd, armedAt, continuesBefore: state.continues ?? 0 })
       : false;
-    await saveState(sessionId, { ...state, continues: decision.continueIndex, watcherArmedAt: spawned ? armedAt : state.watcherArmedAt });
-    if (spawned) await bumpGlobalResumeCount(home);
+    // Field-wise persist under the queue lock: a whole-snapshot saveState
+    // let a stale pre-read write back a watcherArmedAt that settle-fail or
+    // giveup had JUST released (resurrected arm suppressed real re-arms for
+    // the dedupe window). watcherArmedAt only ever moves forward here. The
+    // daily bump happens only for the arm whose token actually WON the
+    // persisted slot — two concurrent arms previously bumped twice for one
+    // surviving arm (ceiling leak).
+    let wonArm = false;
+    await withQueueLock(sessionId, async () => {
+      const fresh = await loadState(sessionId);
+      wonArm = spawned && (!fresh.watcherArmedAt || fresh.watcherArmedAt <= armedAt);
+      await saveState(sessionId, {
+        ...fresh,
+        continues: decision.continueIndex,
+        watcherArmedAt: spawned
+          ? Math.max(armedAt, fresh.watcherArmedAt ?? 0)
+          : (fresh.watcherArmedAt && fresh.watcherArmedAt !== state.watcherArmedAt
+            ? fresh.watcherArmedAt // moved since our read (released or re-armed): keep the newer truth
+            : state.watcherArmedAt),
+      });
+    });
+    if (wonArm) await bumpGlobalResumeCount(home);
     if (!spawned) {
       const why = deliveryInFlight
         ? "delivery in flight"

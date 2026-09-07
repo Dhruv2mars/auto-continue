@@ -29,8 +29,8 @@ function drainCli(sessionId) {
   });
 }
 
-function settleCli(sessionId, mode = "", fp = "") {
-  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, fp].filter((x) => x !== ""), {
+function settleCli(sessionId, mode = "", arg4 = "", arg5 = "") {
+  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, arg4, arg5].filter((x) => x !== ""), {
     env: { ...process.env, AUTO_CONTINUE_HOME: home },
     cwd: import.meta.dir,
     encoding: "utf8",
@@ -121,7 +121,7 @@ describe("round-4: drain ownership", () => {
     // Arm BEFORE the marker stamp (the real chain's order — the ownership
     // check requires armedAt <= stampTs).
     const tok = await armForSettle(sid);
-    settleCli(sid, "begin", promptFingerprint("DUP-MARKER-xyz"));
+    settleCli(sid, "begin", promptFingerprint("DUP-MARKER-xyz"), tok);
     // Hook sees a stale marker and restores the head, leaving its receipt
     // (what cli.mjs does on both restore sites); the resume then SUCCEEDS
     // and settle acks.
@@ -131,7 +131,7 @@ describe("round-4: drain ownership", () => {
     // Settle success (owning the arm) with the receipt matching the marker
     // fingerprint: drops .draining AND the restored queue head — no
     // re-delivery.
-    settleCli(sid, "success", tok);
+    settleCli(sid, "success", "", tok);
     expect(await readDraining(sid)).toBeNull();
     expect((await listQueue(sid)).length).toBe(0);
     // A later wake finds nothing to send (empty output, no restore loop).
@@ -146,13 +146,13 @@ describe("round-4: drain ownership", () => {
     await enqueue(sid, "in-flight-prompt");
     const head = await drainHead(sid);
     const tok3 = await armForSettle(sid);
-    settleCli(sid, "begin", head.prompt);
+    settleCli(sid, "begin", head.prompt, tok3);
     // User enqueues a DIFFERENT prompt mid-flight; the hook's stale restore
     // leaves a receipt for THAT new prompt, but settle only drops a head
     // matching the DELIVERED fingerprint — the new prompt survives.
     await enqueue(sid, "user-second-prompt");
     await markRestored(sid, promptFingerprint("user-second-prompt"));
-    settleCli(sid, "success", tok3);
+    settleCli(sid, "success", "", tok3);
     const q = await listQueue(sid);
     expect(q.length).toBe(1);
     expect(q[0].prompt).toBe("user-second-prompt");

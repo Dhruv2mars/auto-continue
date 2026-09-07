@@ -17,8 +17,8 @@ function cliPath() {
   return new URL("../core/cli.mjs", import.meta.url).pathname;
 }
 
-function settleCli(sessionId, mode = "", tok = "") {
-  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, tok], {
+function settleCli(sessionId, mode = "", arg4 = "", arg5 = "") {
+  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, arg4, arg5].filter((x) => x !== ""), {
     env: { ...process.env, AUTO_CONTINUE_HOME: home },
     cwd: import.meta.dir,
     encoding: "utf8",
@@ -148,19 +148,19 @@ describe("round-6: settle ownership", () => {
     expect(head.prompt).toBe("OWNED-HEAD");
     // Arm 1 owns the delivery; marker stamped at wake (ts >= armedAt).
     const tok1 = await armToken(sid, 0);
-    settleCli(sid, "begin", promptFingerprint("OWNED-HEAD"));
+    settleCli(sid, "begin", promptFingerprint("OWNED-HEAD"), tok1);
     // Arm 2 supersedes (real limit event re-armed): state now arm 2's, and
     // arm 2's own wake re-stamped the marker (newer stamp, its ownership).
     const armedAt2 = Date.now();
     await saveState(sid, { continues: 1, watcherArmedAt: armedAt2, updatedAt: 0 });
-    settleCli(sid, "begin", promptFingerprint("OWNED-HEAD"));
+    settleCli(sid, "begin", promptFingerprint("OWNED-HEAD"), `${armedAt2}:1`);
     // Arm 1's late FAIL settle must NOT restore arm 2's head or release arm 2.
-    settleCli(sid, "fail", tok1);
+    settleCli(sid, "fail", "", tok1);
     expect(await readDraining(sid)).not.toBeNull();
     const st = await loadState(sid);
     expect(st.watcherArmedAt).toBe(armedAt2);
     // Arm 2's own fail settle: restores the head AND releases its own arm.
-    settleCli(sid, "fail", `${armedAt2}:1`);
+    settleCli(sid, "fail", "", `${armedAt2}:1`);
     expect(await readDraining(sid)).toBeNull();
     expect((await listQueue(sid)).length).toBe(1);
     const st2 = await loadState(sid);

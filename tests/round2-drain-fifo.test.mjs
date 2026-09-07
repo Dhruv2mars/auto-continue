@@ -16,16 +16,16 @@ import { enqueue, drainHead, listQueue, readDraining } from "../core/lib/queue.m
 let home;
 let origEnv;
 
-function drainCli(sessionId) {
-  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain.mjs"), sessionId], {
+function drainCli(sessionId, armedAtTok = "") {
+  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain.mjs"), sessionId, armedAtTok].filter((x) => x !== ""), {
     env: { ...process.env, AUTO_CONTINUE_HOME: home },
     cwd: import.meta.dir,
     encoding: "utf8",
   });
 }
 
-function settleCli(sessionId, mode = "", tok = "") {
-  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, tok].filter((x) => x !== ""), {
+function settleCli(sessionId, mode = "", arg4 = "", arg5 = "") {
+  return spawnSync("node", [join(import.meta.dir, "..", "core", "drain-settle.mjs"), sessionId, mode, arg4, arg5].filter((x) => x !== ""), {
     env: { ...process.env, AUTO_CONTINUE_HOME: home },
     cwd: import.meta.dir,
     encoding: "utf8",
@@ -72,7 +72,7 @@ describe("round-2: wake with pending .draining restores FIFO", () => {
     const tok = await armForSettle(sid);
 
     // Wake 1: the interrupted head must come out first (not canned fallback).
-    const d1 = drainCli(sid);
+    const d1 = drainCli(sid, tok.split(":")[0]);
     expect(d1.status).toBe(0);
     expect(d1.stdout.toString()).toBe("interrupted-prompt-xyz");
     expect(await readDraining(sid)).not.toBeNull();
@@ -80,15 +80,15 @@ describe("round-2: wake with pending .draining restores FIFO", () => {
     // The resume exits 0 -> settle acks (and clears the marker); wake 2
     // delivers the second prompt. Settles carry the arm token (real-chain
     // ownership) via the persisted armedAt.
-    await settleCli(sid, "success", tok);
-    const d2 = drainCli(sid);
+    await settleCli(sid, "success", "", tok);
+    const d2 = drainCli(sid, tok.split(":")[0]);
     expect(d2.stdout.toString()).toBe("second-prompt");
-    await settleCli(sid, "success", tok);
+    await settleCli(sid, "success", "", tok);
 
     // Genuinely empty queue: empty output is the canned fallback signal.
     // The canned path is NOT a queue delivery — no ownership marker (a
     // marker here would orphan fresh for 10 min and starve enqueues).
-    const d3 = drainCli(sid);
+    const d3 = drainCli(sid, tok.split(":")[0]);
     expect(d3.status).toBe(0);
     expect(d3.stdout.toString()).toBe("");
     expect((await listQueue(sid)).length).toBe(0);

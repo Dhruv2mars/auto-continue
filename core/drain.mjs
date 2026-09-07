@@ -16,7 +16,9 @@ import { drainIfUnowned } from "./lib/queue.mjs";
 
 try {
   const sessionId = process.argv[2] ?? "default";
-  const res = await drainIfUnowned(sessionId);
+  // argv[3]: the arming watcher's arm token (armedAt), stamped into the
+  // ownership marker so this wake's settle can prove it owns the marker.
+  const res = await drainIfUnowned(sessionId, process.argv[3] ?? "0");
   if (res.skipped) process.exit(3);
   if (res.head) process.stdout.write(res.head.prompt);
 } catch {

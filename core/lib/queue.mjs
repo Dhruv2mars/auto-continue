@@ -218,9 +218,16 @@ export const readDraining = readDrainingRaw;
 const LOCK_TIMEOUT_MS = 5000;
 
 async function holderAlive(lockPath) {
+  let raw;
   try {
-    const pid = parseInt(await readFile(lockPath, "utf8"), 10);
-    if (!Number.isInteger(pid) || pid <= 0) return false; // corrupt -> stealable
+    raw = await readFile(lockPath, "utf8");
+  } catch (err) {
+    if (err?.code === "ENOENT") return false; // gone: claimable
+    return true; // unreadable: presume alive
+  }
+  const pid = parseInt(raw, 10);
+  if (!Number.isInteger(pid) || pid <= 0) return true; // EMPTY/partial bytes = a live writer mid-create; never steal
+  try {
     process.kill(pid, 0); // signal 0 = liveness probe
     return true;
   } catch (err) {
@@ -233,22 +240,34 @@ export async function withQueueLock(sessionId, fn) {
   const dir = queueDir();
   await mkdir(dir, { recursive: true });
   const lockPath = join(dir, `${sessionKey(sessionId)}.lock`);
+  // Create via link(): the tmp file is fully written first, then LINKED —
+  // link fails with EEXIST when the destination exists (rename would
+  // silently REPLACE a live holder's lock). So the lock never exists in a
+  // half-written state AND the claim is genuinely exclusive.
+  const tmpLock = `${lockPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+  await writeFile(tmpLock, String(process.pid));
+  const { link } = await import("node:fs/promises");
   const deadline = Date.now() + LOCK_TIMEOUT_MS;
   let locked = false;
   while (Date.now() < deadline) {
     try {
-      await writeFile(lockPath, String(process.pid), { flag: "wx" });
+      await link(tmpLock, lockPath);
       locked = true;
       break;
-    } catch {
-      if (!(await holderAlive(lockPath))) {
-        // Holder provably dead: steal and retry the O_EXCL claim.
-        await rm(lockPath, { force: true });
-        continue;
+    } catch (err) {
+      if (err?.code === "EEXIST") {
+        if (!(await holderAlive(lockPath))) {
+          // Holder provably dead: steal and retry the link claim.
+          await rm(lockPath, { force: true });
+          continue;
+        }
+        await new Promise((r) => setTimeout(r, 25));
+      } else {
+        break; // unexpected IO error: fail loudly below
       }
-      await new Promise((r) => setTimeout(r, 25));
     }
   }
+  await rm(tmpLock, { force: true });
   if (!locked) throw new Error(`queue busy: lock for ${sessionId} held by a live process`);
   try {
     return await fn();
@@ -340,7 +359,7 @@ export async function dropIfRestored(sessionId, fingerprint) {
  * canned path (no marker; concurrent canned sends are idempotent resumes
  * of the same turn, and the next queue delivery re-claims cleanly).
  */
-export async function drainIfUnowned(sessionId) {
+export async function drainIfUnowned(sessionId, armToken = "0") {
   return withQueueLock(sessionId, async () => {
     const marker = await markerInfo(sessionId);
     if (marker.fresh) return { skipped: true, why: "delivery in flight" };
@@ -349,7 +368,9 @@ export async function drainIfUnowned(sessionId) {
     if (head) {
       const fp = promptFingerprint(head.prompt);
       const markerPath = join(queueDir(), `${sessionKey(sessionId)}.settling`);
-      await atomicWrite(markerPath, `${Date.now()} ${fp}`);
+      // Stamp carries the arm token so this watcher's settle can prove
+      // marker ownership (a takeover re-stamp carries the newer token).
+      await atomicWrite(markerPath, `${Date.now()} ${fp} ${String(armToken).split(":")[0]}`);
       return { head, fingerprint: fp };
     }
     return { head: null };
