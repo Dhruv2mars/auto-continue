@@ -65,6 +65,25 @@ describe("classify", () => {
     expect(c.kind).toBe("rate_limit");
   });
 
+  test("matcher + 401 text stays auth", () => {
+    const c = classify({ matcher: "rate_limit", text: "invalid api key (401 unauthorized)" });
+    expect(c.kind).toBe("auth");
+  });
+
+  test("matcher + abort text stays abort", () => {
+    const c = classify({ matcher: "rate_limit", text: "Request was aborted by user" });
+    expect(c.kind).toBe("abort");
+  });
+
+  test("structured 429 with retry text merges retryAfterSec", () => {
+    const c = classify({
+      error: { statusCode: 429, message: "Rate limit reached. Try again in 12 minutes." },
+    });
+    expect(c.kind).toBe("rate_limit");
+    expect(c.retryAfterSec).toBe(720);
+    expect(c.source).toBe("structured");
+  });
+
   test("full payload stringify baseline still classifies undocumented shapes", () => {
     const c = classify({ payload: { weird: { nested: "Error: usage limit exceeded for your plan" } } });
     expect(c.kind).toBe("rate_limit");
@@ -200,5 +219,102 @@ describe("cli end to end", () => {
       cwd: import.meta.dir,
     });
     expect(p.exitCode).toBe(0);
+  });
+});
+
+describe("classify round-2 fixes", () => {
+  test("string statusCode '429' coerces to rate_limit", () => {
+    const c = classify({ error: { statusCode: "429" } });
+    expect(c.kind).toBe("rate_limit");
+  });
+
+  test("string statusCode '401' coerces to auth", () => {
+    const c = classify({ error: { statusCode: "401" } });
+    expect(c.kind).toBe("auth");
+  });
+
+  test("numeric-string status in data.status coerces", () => {
+    const c = classify({ error: { data: { status: "529" } } });
+    expect(c.kind).toBe("overloaded");
+  });
+
+  test("non-numeric status falls through to text baseline", () => {
+    const c = classify({ error: { statusCode: "abc", message: "rate limit exceeded" } });
+    expect(c.kind).toBe("rate_limit");
+    expect(c.source).toBe("text");
+  });
+
+  test("isRetryable=true maps to overloaded, not rate_limit", () => {
+    const c = classify({ error: { isRetryable: true, message: "connection timeout" } });
+    expect(c.kind).toBe("overloaded");
+    expect(c.source).toBe("structured");
+  });
+
+  test("matcher + isRetryable stays rate_limit (matcher wins advisory)", () => {
+    const c = classify({ matcher: "rate_limit", error: { isRetryable: true } });
+    expect(c.kind).toBe("rate_limit");
+  });
+
+  test("benign assistant prose mentioning quota words does not classify rate_limit", () => {
+    const c = classify({
+      text: "I raised the stream buffer's capacity to 4 so the quota of open files per process is not hit.",
+    });
+    expect(c.kind).toBe("other");
+  });
+
+  test("benign prose with 'limit ... reached' spread does not classify rate_limit", () => {
+    // Regression: /limit.*reached|reached.*limit/ spanned arbitrary prose.
+    const texts = [
+      "Once the 100th row is reached, we apply a limit to keep memory bounded.",
+      "The character limit for titles was reached, so the import stopped early.",
+    ];
+    for (const text of texts) expect(classify({ text }).kind).toBe("other");
+  });
+
+  test("benign prose merely mentioning limit vocabulary does not classify rate_limit", () => {
+    // Regression: weak tokens ('rate limit', '429') matched explanatory
+    // prose; they now need addressee/retry/reset corroboration.
+    const texts = [
+      "Next I will discuss the rate limit headers documented in the API docs.",
+      "The 429 status code is returned when a client exceeds its allowance in a window.",
+      "The rate limit configuration lives in the config file.",
+    ];
+    for (const text of texts) expect(classify({ text }).kind).toBe("other");
+  });
+
+  test("bare 'you' inside quoted prose is not corroboration", () => {
+    // Regression: LIMIT_CONTEXT_RE matched \byou\b anywhere, so prose quoting
+    // a weak token plus an incidental 'you' armed the watcher.
+    const texts = [
+      "The rate limit applies per API key unless you purchase an enterprise plan.",
+      "The 429 error page shows users what they can do.",
+    ];
+    for (const text of texts) expect(classify({ text }).kind).toBe("other");
+    // Possessive/addressee forms still corroborate.
+    expect(classifyText("Your rate limit resets at 5pm.").kind).toBe("rate_limit");
+    expect(classifyText("You have hit your weekly limit. Try again later.").kind).toBe("rate_limit");
+  });
+
+  test("'retry after 60s' parses without 'again'", () => {
+    // Regression: RELATIVE_RE required 'again', so the common 'retry after
+    // Ns' phrasing fell through to the policy backoff floor.
+    expect(parseRetryAfterSec("429 Too Many Requests, retry after 60s")).toBe(60);
+    expect(parseRetryAfterSec("429 Too Many Requests. Please try again in 60 seconds.")).toBe(60);
+    expect(parseRetryAfterSec("Error 429: retry-after: 120")).toBe(120);
+  });
+
+  test("real limit messages that name the limit explicitly still classify rate_limit", () => {
+    expect(classifyText("You have reached your usage limit. Your limit will reset at 5:00pm.").kind).toBe("rate_limit");
+    expect(classifyText("usage limit reached").kind).toBe("rate_limit");
+    expect(classifyText("rate limit reached, retry later").kind).toBe("rate_limit");
+    expect(classifyText("Claude's usage limit has been reached. Your limit will reset at 5:00pm.").kind).toBe("rate_limit");
+    expect(classifyText("API Error: 429 too many requests").kind).toBe("rate_limit");
+  });
+
+  test("HTTP-date retry-after header does not produce NaN delaySec", () => {
+    const c = classify({ error: { statusCode: 429, responseHeaders: { "retry-after": "Wed, 21 Oct 2026 07:28:00 GMT" } } });
+    expect(c.kind).toBe("rate_limit");
+    expect(c.retryAfterSec).toBeNull();
+    expect(Number.isFinite(c.retryAfterSec) || c.retryAfterSec === null).toBe(true);
   });
 });

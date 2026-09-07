@@ -5,14 +5,28 @@
  * undocumented payload shape still classifies; structured fields refine it.
  */
 
-const RATE_LIMIT_RE = /rate limit|usage limit|usage cap|token limit|429|too many requests|quota|plan limit|weekly limit|daily limit|limit.*reached|reached.*limit/i;
-const OVERLOAD_RE = /overloaded|over capacity|capacity|529|server is busy|temporarily unavailable/i;
+// Limit idioms only: bare nouns like "quota" or "capacity" appear constantly
+// in benign assistant prose ("the quota of open files per process"), and
+// wildcard spans like /limit.*reached/ match ordinary sentences ("once the
+// 100th row is reached, we apply a limit"), so this list stays literal.
+// Strong idioms assert the limit event itself. Weak tokens (WEAK_LIMIT_RE)
+// merely mention limit vocabulary ("next I will discuss the rate limit
+// headers") and only classify when corroborated by addressee/retry/reset
+// language (LIMIT_CONTEXT_RE) — real limit messages talk to *you* and say
+// when to *try again*; explanatory prose does neither.
+const RATE_LIMIT_RE = /usage limit (?:has been |was |is )?(?:reached|hit)|rate limit (?:has been |was |is )?(?:reached|exceeded|hit)|(?:reached|hit|exceeded) your (?:usage|rate|token|plan|weekly|daily) limit|you(?:'ve)? h(?:it|ave reached)|you have reached your|too many requests|quota (?:exceeded|exhausted|reached|limit)|your quota|quota is (?:exceeded|exhausted)|plan limit (?:has been |was )?(?:reached|hit)/i;
+const WEAK_LIMIT_RE = /\b(?:rate|usage|token|plan|weekly|daily|character|message) limit\b|usage cap|\b429\b/i;
+// Corroboration must be the message addressing the user or scheduling the
+// retry — bare "you" also appears inside quoted prose ("unless you purchase
+// an enterprise plan"), so only possessive/imperative forms count.
+const LIMIT_CONTEXT_RE = /\b(?:your|you've|you'll|you have|you can|please|try again|retry|resets? (?:at|in|on)|wait|come back|later|paused?|temporarily)\b/i;
+const OVERLOAD_RE = /overloaded|over capacity|at capacity|529|server is busy|temporarily unavailable/i;
 const AUTH_RE = /invalid api key|unauthorized|authentication|401|forbidden|403|not authenticated/i;
 const BILLING_RE = /billing|credit|payment|insufficient funds|402|subscription/i;
 const ABORT_RE = /aborted|abortedbyuser|user interrupt|cancelled by user|canceled by user/i;
 
 const CLOCK_RE = /\b(?:resets?|reset)(?:\s+at|\s+by)?\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)?/i;
-const RELATIVE_RE = /\b(?:retry|try) again (?:in|after)\s+(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)\b/i;
+const RELATIVE_RE = /\b(?:(?:retry|try) again|retry|try again) (?:in|after)\s+(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)\b/i;
 const DURATION_RE = /\bin\s+(\d+(?:\.\d+)?)\s*(s|sec|secs|seconds|m|min|mins|minutes|h|hr|hrs|hours)\b/i;
 
 function secondsFromUnit(n, unit) {
@@ -44,28 +58,42 @@ export function parseRetryAfterSec(text) {
   return null;
 }
 
+// retry-after may be delta-seconds ("120") or an HTTP-date; an HTTP-date is
+// deliberately not parsed here (clock skew turns it into a wrong wait), so it
+// degrades to null and the policy falls back to its default ladder.
+function parseRetryAfterHeaderValue(ra) {
+  if (!ra) return null;
+  const n = Math.ceil(parseFloat(ra));
+  return Number.isFinite(n) && n >= 0 ? n : null;
+}
+
 export function classifyText(text) {
   if (!text) return { kind: "other", retryAfterSec: null };
   if (ABORT_RE.test(text)) return { kind: "abort", retryAfterSec: null };
   if (AUTH_RE.test(text)) return { kind: "auth", retryAfterSec: null };
   if (BILLING_RE.test(text)) return { kind: "billing", retryAfterSec: null };
-  if (RATE_LIMIT_RE.test(text)) return { kind: "rate_limit", retryAfterSec: parseRetryAfterSec(text) };
+  const limitHit = RATE_LIMIT_RE.test(text) || (WEAK_LIMIT_RE.test(text) && LIMIT_CONTEXT_RE.test(text));
+  if (limitHit) return { kind: "rate_limit", retryAfterSec: parseRetryAfterSec(text) };
   if (OVERLOAD_RE.test(text)) return { kind: "overloaded", retryAfterSec: parseRetryAfterSec(text) };
   return { kind: "other", retryAfterSec: null };
 }
 
 function fromStructured(error) {
   if (!error || typeof error !== "object") return null;
-  const status = error.statusCode ?? error.status ?? error.data?.statusCode ?? error.data?.status;
+  // Coerce: providers send "429" (string) as often as 429 (number).
+  const raw = error.statusCode ?? error.status ?? error.data?.statusCode ?? error.data?.status;
+  const status = raw == null || raw === "" ? NaN : Number(raw);
   if (status === 429) {
     const headers = error.responseHeaders ?? error.data?.responseHeaders ?? {};
     const ra = headers["retry-after"] ?? headers["Retry-After"];
-    return { kind: "rate_limit", retryAfterSec: ra ? Math.ceil(parseFloat(ra)) : null };
+    return { kind: "rate_limit", retryAfterSec: parseRetryAfterHeaderValue(ra) };
   }
   if (status === 401 || status === 403) return { kind: "auth", retryAfterSec: null };
   if (status === 402) return { kind: "billing", retryAfterSec: null };
   if (status === 529 || status === 503) return { kind: "overloaded", retryAfterSec: null };
-  if (error.isRetryable === true) return { kind: "rate_limit", retryAfterSec: null };
+  // isRetryable means "transient, try again soon" (timeouts, capacity) —
+  // overloaded, not rate_limit: it must not consume the quota backoff ladder.
+  if (error.isRetryable === true) return { kind: "overloaded", retryAfterSec: null };
   return null;
 }
 
@@ -78,8 +106,14 @@ export function classify(input = {}) {
   const text = [input.text, input.error?.message, input.error?.data?.message].filter(Boolean).join(" ");
   const textual = classifyText(text || (input.payload ? JSON.stringify(input.payload) : ""));
   if (input.matcher && /rate_limit|ratelimit/i.test(input.matcher)) {
+    if (structured && (structured.kind === "auth" || structured.kind === "billing")) {
+      return { kind: structured.kind, retryAfterSec: structured.retryAfterSec ?? textual.retryAfterSec, source: "structured" };
+    }
+    if (textual.kind === "abort" || textual.kind === "auth" || textual.kind === "billing") {
+      return { ...textual, source: "text" };
+    }
     return { kind: "rate_limit", retryAfterSec: structured?.retryAfterSec ?? textual.retryAfterSec, source: "matcher" };
   }
-  if (structured) return { ...structured, source: "structured" };
+  if (structured) return { kind: structured.kind, retryAfterSec: structured.retryAfterSec ?? textual.retryAfterSec, source: "structured" };
   return { ...textual, source: "text" };
 }
