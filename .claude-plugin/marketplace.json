@@ -1,13 +1,21 @@
 {
   "name": "auto-continue",
-  "owner": { "name": "Dhruv2mars" },
+  "owner": {
+    "name": "Dhruv2mars"
+  },
   "plugins": [
     {
       "name": "auto-continue",
       "source": "./",
       "description": "Automatically resume sessions interrupted by usage limits.",
-      "version": "0.1.0",
-      "keywords": ["auto-continue", "rate-limit", "quota", "resume", "hooks"]
+      "version": "1.0.0",
+      "keywords": [
+        "auto-continue",
+        "rate-limit",
+        "quota",
+        "resume",
+        "hooks"
+      ]
     }
   ]
 }

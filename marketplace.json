@@ -4,8 +4,8 @@
     {
       "name": "auto-continue",
       "source": "./",
-      "description": "Automatically resume sessions interrupted by usage limits.",
-      "version": "0.1.0"
+      "description": "Queue a prompt now; it is sent when your rate-limit window reopens.",
+      "version": "1.0.0"
     }
   ]
 }
