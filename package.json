@@ -1,9 +1,37 @@
 {
   "name": "auto-continue",
-  "private": true,
-  "version": "1.0.0",
+  "version": "1.1.0",
+  "description": "Resume coding-agent sessions after usage limits reset.",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Dhruv2mars/auto-continue.git"
+  },
+  "homepage": "https://github.com/Dhruv2mars/auto-continue#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    ".agents",
+    ".claude-plugin",
+    ".codex-plugin",
+    ".cursor-plugin",
+    ".opencode/plugins",
+    "bin",
+    "commands",
+    "cursor",
+    "hooks",
+    "skills",
+    "LICENSE",
+    "README.md",
+    "marketplace.json",
+    "plugin.json"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
   "scripts": {
     "test": "bun test"
   },

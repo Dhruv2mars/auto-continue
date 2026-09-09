@@ -1,0 +1,12 @@
+{
+  "name": "auto-continue",
+  "version": "1.1.0",
+  "description": "Queue a prompt locally and send it to the same Codex session when usage resets.",
+  "author": {
+    "name": "Dhruv2mars"
+  },
+  "license": "MIT",
+  "repository": "https://github.com/Dhruv2mars/auto-continue",
+  "skills": "./skills",
+  "hooks": "./hooks/hooks.json"
+}

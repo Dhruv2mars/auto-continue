@@ -1,0 +1,20 @@
+{
+  "name": "auto-continue",
+  "interface": {
+    "displayName": "auto-continue"
+  },
+  "plugins": [
+    {
+      "name": "auto-continue",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Developer Tools"
+    }
+  ]
+}
