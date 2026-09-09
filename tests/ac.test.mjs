@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -95,9 +95,38 @@ test("two prompts for one session do not overlap", { timeout: 20000 }, async () 
 });
 
 test("an unconfigured harness refuses instead of running claude", () => {
-  expect(() => run(["add", "at", "+1s", "work"], { AC_HARNESS: "codex", AC_SEND_CODEX: "" }))
-    .toThrow(/AC_SEND_CODEX|Command failed/);
+  expect(() => run(["add", "at", "+1s", "work"], { AC_HARNESS: "unknown", AC_SEND_UNKNOWN: "" }))
+    .toThrow(/AC_SEND_UNKNOWN|Command failed/);
   expect(existsSync(sent)).toBe(false);
+});
+
+test("built-in adapters target the selected harness and session", async () => {
+  const fakeBin = join(home, "bin");
+  const calls = join(home, "calls.txt");
+  execFileSync("mkdir", ["-p", fakeBin]);
+  for (const name of ["claude", "opencode", "cursor-agent"]) {
+    const path = join(fakeBin, name);
+    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${name}:'\"$*\" >> '${calls}'\nprintf '%s\\n' \"$*\" | grep -q 'adapter prompt'\n`);
+    chmodSync(path, 0o755);
+  }
+  const codex = join(fakeBin, "codex");
+  writeFileSync(codex, `#!/bin/sh\np=$(cat)\nprintf '%s\\n' 'codex:'\"$*:$p\" >> '${calls}'\n[ \"$p\" = 'adapter prompt' ]\n`);
+  chmodSync(codex, 0o755);
+
+  for (const harness of ["claude", "codex", "opencode", "cursor"]) {
+    run(["add", "adapter prompt"], {
+      AC_HARNESS: harness,
+      AC_SESSION: `${harness}-session-123`,
+      AC_SEND_CLAUDE: "",
+      PATH: `${fakeBin}:${process.env.PATH}`,
+    });
+  }
+  await sleep(2500);
+  const text = readFileSync(calls, "utf8");
+  expect(text).toContain("claude:--resume claude-session-123");
+  expect(text).toContain("codex:exec resume codex-session-123 -:adapter prompt");
+  expect(text).toContain("opencode:run --session opencode-session-123 adapter prompt");
+  expect(text).toContain("cursor-agent:--resume cursor-session-123 --print --output-format json adapter prompt");
 });
 
 // --- the two cases: limited, and not limited ---

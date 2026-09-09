@@ -39,6 +39,12 @@ const KEEP_DAYS = 7;
 const SEND = {
   claude: `claude --resume "$1" -p --permission-mode acceptEdits --output-format json "$(cat "$2")"`,
   claude_nosession: `claude -c -p --permission-mode acceptEdits --output-format json "$(cat "$2")"`,
+  codex: `codex exec resume "$1" - < "$2"`,
+  codex_nosession: `codex exec resume --last - < "$2"`,
+  opencode: `opencode run --session "$1" "$(cat "$2")"`,
+  opencode_nosession: `opencode run --continue "$(cat "$2")"`,
+  cursor: `cursor-agent --resume "$1" --print --output-format json "$(cat "$2")"`,
+  cursor_nosession: `cursor-agent --continue --print --output-format json "$(cat "$2")"`,
 };
 
 function dir(...p) {
@@ -156,6 +162,7 @@ function cmdDelay(argv) {
 }
 
 function detectHarness(env = process.env) {
+  if (env.AUTO_CONTINUE_HARNESS) return env.AUTO_CONTINUE_HARNESS;
   if (env.ZCODE_SESSION_ID) return "zcode";
   if (env.CODEX_SESSION_ID) return "codex";
   if (env.CURSOR_SESSION_ID) return "cursor";
@@ -163,15 +170,15 @@ function detectHarness(env = process.env) {
 }
 
 function detectSession(env = process.env) {
-  return env.AC_SESSION || env.CLAUDE_CODE_SESSION_ID || env.ZCODE_SESSION_ID ||
-    env.CODEX_SESSION_ID || env.CURSOR_SESSION_ID || "";
+  return env.AC_SESSION || env.AUTO_CONTINUE_SESSION || env.CLAUDE_CODE_SESSION_ID ||
+    env.CODEX_THREAD_ID || env.CODEX_SESSION_ID || env.OPENCODE_SESSION_ID ||
+    env.CURSOR_SESSION_ID || "";
 }
 
 function sendTemplate(harness, session) {
   const override = process.env[`AC_SEND_${harness.toUpperCase()}`];
   if (override) return override;
-  if (harness === "claude") return session ? SEND.claude : SEND.claude_nosession;
-  return null; // no guessing another harness's CLI: refuse and say so
+  return SEND[session ? harness : `${harness}_nosession`] ?? null;
 }
 
 function alive(pid) {
