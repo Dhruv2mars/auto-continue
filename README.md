@@ -10,12 +10,11 @@ Queue a prompt locally and send it to the same coding-agent session when its usa
 
 ## Install
 
-Clone the repository and install the shared `ac` command:
+Install the shared `ac` command from npm:
 
 ```sh
-git clone https://github.com/Dhruv2mars/auto-continue
-cd auto-continue
-bun link
+npm install --global auto-continue
+# or: bun install --global auto-continue
 ```
 
 Then enable the integration you use.
@@ -40,21 +39,21 @@ Review and trust the plugin hooks when Codex asks. Run `$auto-continue <prompt>`
 
 ### OpenCode
 
-Link the plugin into OpenCode's global plugin directory:
+Link the installed plugin into OpenCode's global plugin directory:
 
 ```sh
 mkdir -p ~/.config/opencode/plugins
-ln -s "$PWD/.opencode/plugins/auto-continue.ts" ~/.config/opencode/plugins/auto-continue.ts
+ln -sfn "$(ac root)/.opencode/plugins/auto-continue.ts" ~/.config/opencode/plugins/auto-continue.ts
 ```
 
 Run `/auto-continue <prompt>`. OpenCode may also print the local short-circuit as a command error after the prompt has been queued. The success toast and `ac list` show the real result.
 
 ### Cursor
 
-Load this checkout as a Cursor plugin:
+Load the installed package as a Cursor plugin:
 
 ```sh
-cursor-agent --plugin-dir "$PWD"
+cursor-agent --plugin-dir "$(ac root)"
 ```
 
 Run `/auto-continue <prompt>`. The `sessionStart` hook captures the conversation ID and `beforeSubmitPrompt` queues the prompt without a model request.
@@ -70,6 +69,7 @@ Run `/auto-continue <prompt>`. The `sessionStart` hook captures the conversation
 | `ac add <prompt>` | Queue from any shell |
 | `ac list` | Show queue state |
 | `ac cancel <id\|all>` | Cancel queued prompts |
+| `ac enable-recovery` | Resume overdue prompts automatically after macOS login |
 
 Explicit times accept `3pm`, `3:30pm`, `15:30`, `+5h`, and `90m`.
 
@@ -86,7 +86,7 @@ Built-in send commands resume the captured session:
 | OpenCode | `opencode run --session <session> ...` |
 | Cursor | `cursor-agent --resume <session> --print ...` |
 
-Two prompts for one session run in order. Any `ac` command also restarts sleepers lost to a reboot. A non-limit failure, such as bad credentials or an unknown session, stops without retrying and appears as `failed` in `ac list`.
+Two prompts for one session run in order. Queue updates use an inter-process lock, so simultaneous commands cannot overwrite each other. Any `ac` command also restarts sleepers lost to a reboot. On macOS, run `ac enable-recovery` once to do this automatically at login. A non-limit failure, such as bad credentials or an unknown session, stops without retrying and appears as `failed` in `ac list`.
 
 ## Configuration
 
@@ -103,7 +103,7 @@ The default Claude command uses `--permission-mode acceptEdits` so a queued turn
 
 ## Limits
 
-This is meant for same-day usage windows, not scheduled jobs. If the machine shuts down, overdue work resumes the next time any `ac` command runs. Cursor and Codex require trusted local hooks. OpenCode's V1 plugin API has no clean "handled locally" return value, which is why its TUI can show an error after a successful queue.
+This is meant for same-day usage windows, not scheduled jobs. Without macOS login recovery enabled, overdue work resumes the next time any `ac` command runs. Cursor and Codex require trusted local hooks. OpenCode's V1 plugin API has no clean "handled locally" return value, which is why its TUI can show an error after a successful queue.
 
 ## Development
 
