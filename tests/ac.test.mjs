@@ -2,7 +2,7 @@ import { test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 
 const AC = new URL("../bin/ac.mjs", import.meta.url).pathname;
 let home, sent;
@@ -80,6 +80,35 @@ test("duplicate plugin expansion queues an exact prompt only once", () => {
   run(["cancel", "all"]);
 });
 
+test("concurrent additions cannot overwrite each other", async () => {
+  const env = {
+    ...process.env,
+    AUTO_CONTINUE_HOME: home,
+    AC_PAD_SEC: "0",
+    AC_HARNESS: "claude",
+    AC_SESSION: "S1",
+    AC_SEND_CLAUDE: `printf '%s\\n' "$(cat "$2")" >> ${sent}`,
+  };
+  await Promise.all(Array.from({ length: 12 }, (_, i) => new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [AC, "add", "at", "+5m", `prompt-${i}`], {
+      env,
+      stdio: "ignore",
+    });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`ac exited ${code}`)));
+  })));
+  const queue = JSON.parse(readFileSync(join(home, "queue.json"), "utf8"));
+  expect(queue).toHaveLength(12);
+  expect(new Set(queue.map((entry) => entry.prompt)).size).toBe(12);
+  run(["cancel", "all"]);
+});
+
+test("a malformed queue is reported instead of overwritten", () => {
+  writeFileSync(join(home, "queue.json"), "not json");
+  expect(() => run(["add", "at", "+5m", "work"])).toThrow(/cannot read queue|Command failed/);
+  expect(readFileSync(join(home, "queue.json"), "utf8")).toBe("not json");
+});
+
 test("list reports pending then sent", async () => {
   run(["add", "at", "+1s", "work"]);
   expect(run(["list"])).toContain("pending");
@@ -103,6 +132,21 @@ test("a dead sleeper is re-forked on the next invocation", async () => {
   run(["list"]);
   const after = JSON.parse(readFileSync(join(home, "queue.json"), "utf8"))[0];
   expect(after.pid).not.toBe(before.pid);
+});
+
+test("login recovery installs and removes a launch agent", async () => {
+  const agents = join(home, "LaunchAgents");
+  run(["enable-recovery"], { AUTO_CONTINUE_LAUNCH_AGENTS: agents });
+  const plist = join(agents, "com.auto-continue.recover.plist");
+  const contents = readFileSync(plist, "utf8");
+  expect(contents).toContain("<string>_recover</string>");
+  expect(contents).toContain("<key>RunAtLoad</key><true/>");
+  run(["disable-recovery"], { AUTO_CONTINUE_LAUNCH_AGENTS: agents });
+  expect(existsSync(plist)).toBe(false);
+});
+
+test("root reports the installed plugin directory", () => {
+  expect(run(["root"]).trim()).toBe(new URL("..", import.meta.url).pathname.replace(/\/$/, ""));
 });
 
 test("two prompts for one session do not overlap", { timeout: 20000 }, async () => {

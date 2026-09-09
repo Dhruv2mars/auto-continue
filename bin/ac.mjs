@@ -17,15 +17,18 @@
  *   ac list
  *   ac cancel <id>
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
-  mkdirSync, chmodSync, existsSync, readFileSync, writeFileSync, renameSync, rmSync,
+  mkdirSync, chmodSync, closeSync, existsSync, openSync, readFileSync, writeFileSync,
+  renameSync, rmSync, unlinkSync,
 } from "node:fs";
 
 const HOME = process.env.AUTO_CONTINUE_HOME || join(homedir(), ".auto-continue");
 const QUEUE = join(HOME, "queue.json");
+const LOCK = join(HOME, "queue.lock");
 const PAD_SEC = Number(process.env.AC_PAD_SEC ?? 60);  // clock slop: windows reopen a little late
 const RETRIES = Number(process.env.AC_RETRIES ?? 4);   // attempts before giving up
 const BLIND_SEC = Number(process.env.AC_BLIND_SEC ?? 1800); // wait when the reset time is unreadable
@@ -56,7 +59,10 @@ function dir(...p) {
 }
 
 function readQueue() {
-  try { return JSON.parse(readFileSync(QUEUE, "utf8")); } catch { return []; }
+  try { return JSON.parse(readFileSync(QUEUE, "utf8")); } catch (err) {
+    if (err.code === "ENOENT") return [];
+    throw new Error(`cannot read queue: ${err.message}`);
+  }
 }
 
 function writeQueue(entries) {
@@ -64,6 +70,38 @@ function writeQueue(entries) {
   const tmp = `${QUEUE}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(entries, null, 2));
   renameSync(tmp, QUEUE);
+}
+
+function pause(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function withQueueLock(fn) {
+  dir();
+  const deadline = Date.now() + 5000;
+  let fd;
+  while (fd == null) {
+    try {
+      fd = openSync(LOCK, "wx", 0o600);
+      writeFileSync(fd, JSON.stringify({ pid: process.pid, createdAt: Date.now() }));
+    } catch (err) {
+      if (err.code !== "EEXIST") throw err;
+      let owner = {};
+      try { owner = JSON.parse(readFileSync(LOCK, "utf8")); } catch {}
+      const abandoned = owner.pid && (!alive(owner.pid) || Date.now() - owner.createdAt > 30_000);
+      const unreadable = !owner.pid && Date.now() >= deadline;
+      if (abandoned || unreadable) {
+        try { unlinkSync(LOCK); } catch {}
+        continue;
+      }
+      if (Date.now() >= deadline) throw new Error("queue is busy; try again");
+      pause(25);
+    }
+  }
+  try { return fn(); } finally {
+    try { closeSync(fd); } catch {}
+    try { unlinkSync(LOCK); } catch {}
+  }
 }
 
 /**
@@ -275,6 +313,10 @@ function cmdAdd(argv) {
   // original slash command. Never let a delivery enqueue itself again.
   if (process.env.AUTO_CONTINUE_DELIVERY === "1") return 0;
 
+  return withQueueLock(() => cmdAddLocked(argv));
+}
+
+function cmdAddLocked(argv) {
   // Plugin APIs pass `$ARGUMENTS` as one argv item. Split only the scheduling
   // prefix; the prompt remains byte-for-byte intact.
   if (argv.length === 1) {
@@ -315,7 +357,7 @@ function cmdAdd(argv) {
   // Serialise behind any live send into the same session: two concurrent
   // headless turns on one transcript is the only race left, and one
   // `kill -0` spin removes it without any shared state.
-  const prior = entries.filter((e) => e.session === session && status(e) === "pending").pop();
+  const prior = entries.filter((e) => e.harness === harness && e.session === session && status(e) === "pending").pop();
   const entry = {
     id, harness, session, cwd: process.cwd(), sendAt, prompt, promptFile,
     createdAt: Date.now(), waitPid: prior?.pid ?? null, pid: null,
@@ -338,19 +380,25 @@ function cmdAdd(argv) {
 }
 
 function cmdList() {
-  const entries = prune(readQueue());
-  reconcile(entries);
-  writeQueue(entries);
-  if (!entries.length) { console.log("nothing queued"); return 0; }
-  for (const e of entries) {
-    const when = new Date(e.sendAt).toLocaleString();
-    const p = e.prompt.length > 60 ? e.prompt.slice(0, 57) + "..." : e.prompt;
-    console.log(`${e.id}  ${status(e).padEnd(8)} ${when}  ${e.harness}  ${p}`);
-  }
-  return 0;
+  return withQueueLock(() => {
+    const entries = prune(readQueue());
+    reconcile(entries);
+    writeQueue(entries);
+    if (!entries.length) { console.log("nothing queued"); return 0; }
+    for (const e of entries) {
+      const when = new Date(e.sendAt).toLocaleString();
+      const p = e.prompt.length > 60 ? e.prompt.slice(0, 57) + "..." : e.prompt;
+      console.log(`${e.id}  ${status(e).padEnd(8)} ${when}  ${e.harness}  ${p}`);
+    }
+    return 0;
+  });
 }
 
 function cmdCancel(argv) {
+  return withQueueLock(() => cmdCancelLocked(argv));
+}
+
+function cmdCancelLocked(argv) {
   const target = argv[0];
   if (!target) { console.error("usage: ac cancel <id|all>"); return 1; }
   const entries = readQueue();
@@ -366,6 +414,58 @@ function cmdCancel(argv) {
   return 0;
 }
 
+function xml(s) {
+  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+}
+
+function recoveryAgentPath() {
+  return process.env.AUTO_CONTINUE_LAUNCH_AGENTS
+    ? join(process.env.AUTO_CONTINUE_LAUNCH_AGENTS, "com.auto-continue.recover.plist")
+    : join(homedir(), "Library", "LaunchAgents", "com.auto-continue.recover.plist");
+}
+
+export function recoveryAgent() {
+  const script = fileURLToPath(import.meta.url);
+  return `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.auto-continue.recover</string>
+  <key>ProgramArguments</key>
+  <array><string>${xml(process.execPath)}</string><string>${xml(script)}</string><string>_recover</string></array>
+  <key>RunAtLoad</key><true/>
+</dict>
+</plist>
+`;
+}
+
+function cmdEnableRecovery() {
+  if (process.platform !== "darwin" && !process.env.AUTO_CONTINUE_LAUNCH_AGENTS) {
+    console.error("ac: automatic login recovery currently supports macOS only");
+    return 1;
+  }
+  const path = recoveryAgentPath();
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, recoveryAgent(), { mode: 0o600 });
+  if (!process.env.AUTO_CONTINUE_LAUNCH_AGENTS) {
+    const domain = `gui/${process.getuid()}`;
+    try { execFileSync("launchctl", ["bootout", domain, path], { stdio: "ignore" }); } catch {}
+    execFileSync("launchctl", ["bootstrap", domain, path]);
+  }
+  console.log(`login recovery enabled (${path})`);
+  return 0;
+}
+
+function cmdDisableRecovery() {
+  const path = recoveryAgentPath();
+  if (!process.env.AUTO_CONTINUE_LAUNCH_AGENTS && process.platform === "darwin") {
+    try { execFileSync("launchctl", ["bootout", `gui/${process.getuid()}`, path], { stdio: "ignore" }); } catch {}
+  }
+  try { rmSync(path, { force: true }); } catch {}
+  console.log("login recovery disabled");
+  return 0;
+}
+
 export function main(argv = process.argv.slice(2)) {
   const cmd = (argv[0] || "list").toLowerCase();
   const rest = argv.slice(1);
@@ -373,7 +473,11 @@ export function main(argv = process.argv.slice(2)) {
   if (cmd === "add" || cmd === "queue") return cmdAdd(rest);
   if (cmd === "list" || cmd === "ls") return cmdList();
   if (cmd === "cancel" || cmd === "clear") return cmdCancel(rest);
-  console.error("usage: ac add [at <time>] <prompt...> | ac list | ac cancel <id|all>");
+  if (cmd === "enable-recovery") return cmdEnableRecovery();
+  if (cmd === "disable-recovery") return cmdDisableRecovery();
+  if (cmd === "root") { console.log(dirname(dirname(fileURLToPath(import.meta.url)))); return 0; }
+  if (cmd === "_recover") { cmdList(); return 0; }
+  console.error("usage: ac add [at <time>] <prompt...> | ac list | ac cancel <id|all> | ac enable-recovery");
   return 1;
 }
 
