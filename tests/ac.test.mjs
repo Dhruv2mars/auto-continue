@@ -59,6 +59,27 @@ test("a queued prompt is delivered verbatim at its time", async () => {
   expect(readFileSync(sent, "utf8").trim()).toBe(prompt);
 });
 
+test("a plugin can pass the schedule and prompt as one argument", () => {
+  run(["add", "at +5m keep this prompt intact"]);
+  const [entry] = JSON.parse(readFileSync(join(home, "queue.json"), "utf8"));
+  expect(entry.prompt).toBe("keep this prompt intact");
+  expect(entry.sendAt - entry.createdAt).toBeGreaterThan(299_000);
+  run(["cancel", "all"]);
+});
+
+test("a resumed delivery cannot recursively queue itself", () => {
+  run(["add", "do not queue"], { AUTO_CONTINUE_DELIVERY: "1" });
+  expect(existsSync(join(home, "queue.json"))).toBe(false);
+});
+
+test("duplicate plugin expansion queues an exact prompt only once", () => {
+  run(["add", "at +5m same prompt"]);
+  expect(run(["add", "at +5m same prompt"])).toContain("already queued");
+  const queue = JSON.parse(readFileSync(join(home, "queue.json"), "utf8"));
+  expect(queue).toHaveLength(1);
+  run(["cancel", "all"]);
+});
+
 test("list reports pending then sent", async () => {
   run(["add", "at", "+1s", "work"]);
   expect(run(["list"])).toContain("pending");
@@ -106,11 +127,11 @@ test("built-in adapters target the selected harness and session", async () => {
   execFileSync("mkdir", ["-p", fakeBin]);
   for (const name of ["claude", "opencode", "cursor-agent"]) {
     const path = join(fakeBin, name);
-    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${name}:'\"$*\" >> '${calls}'\nprintf '%s\\n' \"$*\" | grep -q 'adapter prompt'\n`);
+    writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' '${name}:'\"$*:delivery=$AUTO_CONTINUE_DELIVERY\" >> '${calls}'\nprintf '%s\\n' \"$*\" | grep -q 'adapter prompt'\n`);
     chmodSync(path, 0o755);
   }
   const codex = join(fakeBin, "codex");
-  writeFileSync(codex, `#!/bin/sh\np=$(cat)\nprintf '%s\\n' 'codex:'\"$*:$p\" >> '${calls}'\n[ \"$p\" = 'adapter prompt' ]\n`);
+  writeFileSync(codex, `#!/bin/sh\np=$(cat)\nprintf '%s\\n' 'codex:'\"$*:$p:delivery=$AUTO_CONTINUE_DELIVERY\" >> '${calls}'\n[ \"$p\" = 'adapter prompt' ]\n`);
   chmodSync(codex, 0o755);
 
   for (const harness of ["claude", "codex", "opencode", "cursor"]) {
@@ -127,6 +148,7 @@ test("built-in adapters target the selected harness and session", async () => {
   expect(text).toContain("codex:exec resume codex-session-123 -:adapter prompt");
   expect(text).toContain("opencode:run --session opencode-session-123 adapter prompt");
   expect(text).toContain("cursor-agent:--resume cursor-session-123 --print --output-format json adapter prompt");
+  expect(text.match(/delivery=1/g)).toHaveLength(4);
 });
 
 // --- the two cases: limited, and not limited ---

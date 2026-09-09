@@ -32,19 +32,20 @@ const BLIND_SEC = Number(process.env.AC_BLIND_SEC ?? 1800); // wait when the res
 const MAX_WAIT_SEC = 7 * 3600;  // ceiling on any single wait
 const GRACE_SEC = 30 * 60;   // past this, an unsent entry is orphaned regardless of pid
 const KEEP_DAYS = 7;
+const DEDUPE_MS = 60 * 1000;
 
 // One line per harness: $1 is the session id (may be empty), $2 the prompt file.
 // A send must exit nonzero when it did not deliver — that is the only signal
 // `ac` reads. --output-format json makes claude's failures machine-readable.
 const SEND = {
-  claude: `claude --resume "$1" -p --permission-mode acceptEdits --output-format json "$(cat "$2")"`,
-  claude_nosession: `claude -c -p --permission-mode acceptEdits --output-format json "$(cat "$2")"`,
-  codex: `codex exec resume "$1" - < "$2"`,
-  codex_nosession: `codex exec resume --last - < "$2"`,
-  opencode: `opencode run --session "$1" "$(cat "$2")"`,
-  opencode_nosession: `opencode run --continue "$(cat "$2")"`,
-  cursor: `cursor-agent --resume "$1" --print --output-format json "$(cat "$2")"`,
-  cursor_nosession: `cursor-agent --continue --print --output-format json "$(cat "$2")"`,
+  claude: `AUTO_CONTINUE_DELIVERY=1 claude --resume "$1" -p --permission-mode acceptEdits --output-format json "$(cat "$2")"`,
+  claude_nosession: `AUTO_CONTINUE_DELIVERY=1 claude -c -p --permission-mode acceptEdits --output-format json "$(cat "$2")"`,
+  codex: `AUTO_CONTINUE_DELIVERY=1 codex exec resume "$1" - < "$2"`,
+  codex_nosession: `AUTO_CONTINUE_DELIVERY=1 codex exec resume --last - < "$2"`,
+  opencode: `AUTO_CONTINUE_DELIVERY=1 opencode run --session "$1" "$(cat "$2")"`,
+  opencode_nosession: `AUTO_CONTINUE_DELIVERY=1 opencode run --continue "$(cat "$2")"`,
+  cursor: `AUTO_CONTINUE_DELIVERY=1 cursor-agent --resume "$1" --print --output-format json "$(cat "$2")"`,
+  cursor_nosession: `AUTO_CONTINUE_DELIVERY=1 cursor-agent --continue --print --output-format json "$(cat "$2")"`,
 };
 
 function dir(...p) {
@@ -270,6 +271,16 @@ function status(e) {
 }
 
 function cmdAdd(argv) {
+  // Resuming a Claude transcript can replay the shell expansion of the
+  // original slash command. Never let a delivery enqueue itself again.
+  if (process.env.AUTO_CONTINUE_DELIVERY === "1") return 0;
+
+  // Plugin APIs pass `$ARGUMENTS` as one argv item. Split only the scheduling
+  // prefix; the prompt remains byte-for-byte intact.
+  if (argv.length === 1) {
+    const scheduled = argv[0].match(/^at\s+(\S+)\s+([\s\S]+)$/i);
+    if (scheduled) argv = ["at", scheduled[1], scheduled[2]];
+  }
   // The time is optional, and omitting it is the common case: send now, and
   // if that fails because you are limited, the failure names the reset time.
   let sendAt = Date.now();
@@ -288,11 +299,19 @@ function cmdAdd(argv) {
   }
   const harness = process.env.AC_HARNESS || detectHarness();
   const session = detectSession();
+  const entries = prune(readQueue());
+  const duplicate = entries.findLast((e) =>
+    e.harness === harness && e.session === session && e.prompt === prompt &&
+    Date.now() - e.createdAt < DEDUPE_MS
+  );
+  if (duplicate) {
+    console.log(`already queued ${duplicate.id} for ${harness} session ${session.slice(0, 8)}`);
+    return 0;
+  }
   const id = `${new Date(sendAt).toISOString().slice(0, 16).replace(/[:T-]/g, "")}-${Math.random().toString(36).slice(2, 7)}`;
   const promptFile = join(dir("prompts"), `${id}.txt`);
   writeFileSync(promptFile, prompt);
 
-  const entries = prune(readQueue());
   // Serialise behind any live send into the same session: two concurrent
   // headless turns on one transcript is the only race left, and one
   // `kill -0` spin removes it without any shared state.
@@ -310,10 +329,11 @@ function cmdAdd(argv) {
   entries.push(entry);
   writeQueue(entries);
   const where = `${harness}${session ? ` session ${session.slice(0, 8)}` : " (most recent session)"}`;
-  const mins = Math.round((sendAt - Date.now()) / 60000);
-  console.log(mins <= 0
+  const delayMs = sendAt - Date.now();
+  const mins = Math.round(delayMs / 60000);
+  console.log(delayMs < 1000
     ? `sending now to ${where} (${id}) — if you are rate limited it reschedules itself for the reset`
-    : `queued ${id} → ${new Date(sendAt).toLocaleTimeString()} (in ${mins}m), ${where}`);
+    : `queued ${id} → ${new Date(sendAt).toLocaleTimeString()} (${mins > 0 ? `in ${mins}m` : "in under a minute"}), ${where}`);
   return 0;
 }
 
