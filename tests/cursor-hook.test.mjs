@@ -17,7 +17,7 @@ beforeEach(() => { home = mkdtempSync(join(tmpdir(), "ac-cursor-")); });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
 test("Cursor sessionStart exposes the exact conversation to later hooks", () => {
-  expect(hook({ session_id: "cursor-session-1" })).toEqual({
+  expect(hook({ hook_event_name: "sessionStart", session_id: "cursor-session-1" })).toEqual({
     env: {
       AUTO_CONTINUE_HARNESS: "cursor",
       AUTO_CONTINUE_SESSION: "cursor-session-1",
@@ -26,7 +26,11 @@ test("Cursor sessionStart exposes the exact conversation to later hooks", () => 
 });
 
 test("Cursor command is queued locally and blocked before a model request", () => {
-  const result = hook({ prompt: "AUTO_CONTINUE_REQUEST\nfinish the task" }, {
+  const result = hook({
+    hook_event_name: "beforeSubmitPrompt",
+    session_id: "cursor-session-1",
+    prompt: "AUTO_CONTINUE_REQUEST\nfinish the task",
+  }, {
     AUTO_CONTINUE_SESSION: "cursor-session-1",
   });
   expect(result.continue).toBe(false);
@@ -37,6 +41,22 @@ test("Cursor command is queued locally and blocked before a model request", () =
     session: "cursor-session-1",
     prompt: "finish the task",
   });
+});
+
+test("Cursor intercepts the raw slash command before command expansion", () => {
+  const result = hook({
+    hook_event_name: "beforeSubmitPrompt",
+    session_id: "cursor-session-1",
+    prompt: "/auto-continue at +5m finish the task",
+  }, {
+    AUTO_CONTINUE_SESSION: "cursor-session-1",
+  });
+  expect(result.continue).toBe(false);
+  const [entry] = JSON.parse(readFileSync(join(home, "queue.json"), "utf8"));
+  expect(entry.session).toBe("cursor-session-1");
+  expect(entry.prompt).toBe("finish the task");
+  expect(entry.sendAt - entry.createdAt).toBeGreaterThan(299_000);
+  process.kill(-entry.pid, "SIGTERM");
 });
 
 test("Cursor hook ignores ordinary prompts", () => {

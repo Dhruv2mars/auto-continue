@@ -16,7 +16,7 @@ try { event = JSON.parse(input); } catch {
   process.exit(0);
 }
 
-if (event.session_id) {
+if (event.hook_event_name === "sessionStart") {
   console.log(JSON.stringify({
     env: {
       AUTO_CONTINUE_HARNESS: "cursor",
@@ -27,12 +27,13 @@ if (event.session_id) {
 }
 
 const marker = "AUTO_CONTINUE_REQUEST\n";
-if (!event.prompt?.startsWith(marker)) {
+const raw = event.prompt?.match(/^\s*\/auto-continue(?:\s+|$)([\s\S]*)$/i);
+if (!event.prompt?.startsWith(marker) && !raw) {
   console.log(JSON.stringify({ continue: true }));
   process.exit(0);
 }
 
-const prompt = event.prompt.slice(marker.length).trim();
+const prompt = (raw ? raw[1] : event.prompt.slice(marker.length)).trim();
 if (!prompt) {
   console.log(JSON.stringify({ continue: false, user_message: "Usage: /auto-continue <prompt>" }));
   process.exit(0);

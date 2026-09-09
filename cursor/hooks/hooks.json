@@ -3,12 +3,12 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "node \"${CURSOR_PLUGIN_ROOT}/cursor/hooks/auto-continue.mjs\""
+        "command": "node \"./cursor/hooks/auto-continue.mjs\""
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "node \"${CURSOR_PLUGIN_ROOT}/cursor/hooks/auto-continue.mjs\"",
+        "command": "node \"./cursor/hooks/auto-continue.mjs\"",
         "failClosed": true
       }
     ]
