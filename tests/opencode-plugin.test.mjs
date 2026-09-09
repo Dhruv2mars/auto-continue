@@ -5,21 +5,18 @@ import { join } from "node:path"
 import { AutoContinue } from "../.opencode/plugins/auto-continue.ts"
 
 let home
-const AC = new URL("../bin/ac.mjs", import.meta.url).pathname
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "auto-continue-opencode-"))
   process.env.AUTO_CONTINUE_HOME = home
   process.env.AC_PAD_SEC = "0"
   process.env.AC_SEND_OPENCODE = "exit 0"
-  process.env.AUTO_CONTINUE_AC = AC
 })
 
 afterEach(() => {
   delete process.env.AUTO_CONTINUE_HOME
   delete process.env.AC_PAD_SEC
   delete process.env.AC_SEND_OPENCODE
-  delete process.env.AUTO_CONTINUE_AC
   rmSync(home, { recursive: true, force: true })
 })
 

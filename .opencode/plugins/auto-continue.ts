@@ -6,8 +6,14 @@
  * it must not become another model turn after the account has hit its limit.
  */
 import { spawn } from "node:child_process"
+import { dirname, resolve } from "node:path"
+import { fileURLToPath } from "node:url"
 
 const COMMAND = "auto-continue"
+
+function runtimePath() {
+  return resolve(dirname(fileURLToPath(import.meta.url)), "../..", "bin", "ac.mjs")
+}
 
 function runQueue({ directory, sessionID, prompt }) {
   return new Promise((resolveResult) => {
@@ -18,9 +24,9 @@ function runQueue({ directory, sessionID, prompt }) {
       AUTO_CONTINUE_HARNESS: "opencode",
       AUTO_CONTINUE_SESSION: sessionID,
     }
-    // `bun link` installs ac on PATH, so this also works when the plugin is
-    // copied to OpenCode's global plugin directory.
-    const child = spawn(process.env.AUTO_CONTINUE_AC || "ac", ["add", prompt], {
+    // macOS ships /usr/sbin/ac. Invoke this plugin's script explicitly so PATH
+    // can never select the accounting utility instead.
+    const child = spawn(process.env.AUTO_CONTINUE_NODE || "node", [runtimePath(), "add", prompt], {
       cwd: directory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
