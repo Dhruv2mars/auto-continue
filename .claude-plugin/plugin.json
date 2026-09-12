@@ -1,6 +1,6 @@
 {
   "name": "auto-continue",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "Queue a prompt now; it is sent when your rate-limit window reopens.",
   "commands": "./commands",
   "skills": []
