@@ -23,7 +23,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   mkdirSync, chmodSync, closeSync, existsSync, openSync, readFileSync, writeFileSync,
-  renameSync, rmSync, unlinkSync,
+  realpathSync, renameSync, rmSync, unlinkSync,
 } from "node:fs";
 
 const HOME = process.env.AUTO_CONTINUE_HOME || join(homedir(), ".auto-continue");
@@ -481,4 +481,6 @@ export function main(argv = process.argv.slice(2)) {
   return 1;
 }
 
-if (process.argv[1]?.endsWith("ac.mjs")) process.exit(main());
+let invokedDirectly = false;
+try { invokedDirectly = realpathSync(process.argv[1]) === fileURLToPath(import.meta.url); } catch {}
+if (invokedDirectly) process.exit(main());

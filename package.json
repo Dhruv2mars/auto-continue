@@ -1,6 +1,6 @@
 {
   "name": "auto-continue",
-  "version": "1.1.1",
+  "version": "1.1.2",
   "description": "Resume coding-agent sessions after usage limits reset.",
   "license": "MIT",
   "type": "module",
