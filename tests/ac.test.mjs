@@ -1,5 +1,5 @@
 import { test, expect, beforeEach, afterEach } from "bun:test";
-import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, readdirSync, writeFileSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawn } from "node:child_process";
@@ -147,6 +147,13 @@ test("login recovery installs and removes a launch agent", async () => {
 
 test("root reports the installed plugin directory", () => {
   expect(run(["root"]).trim()).toBe(new URL("..", import.meta.url).pathname.replace(/\/$/, ""));
+});
+
+test("the CLI runs through an npm-style executable symlink", () => {
+  const link = join(home, "ac");
+  symlinkSync(AC, link);
+  expect(execFileSync(link, ["root"], { encoding: "utf8" }).trim())
+    .toBe(new URL("..", import.meta.url).pathname.replace(/\/$/, ""));
 });
 
 test("two prompts for one session do not overlap", { timeout: 20000 }, async () => {
